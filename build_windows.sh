@@ -5,6 +5,7 @@
 set -e
 cd "$(dirname "$0")"
 
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-/tmp/cnav_build}"
 OUT="$BUILD_DIR/win_dist/CantiereNavalePro-Windows"
 PYVER="3.13.15"
@@ -39,8 +40,8 @@ for w in "$BUILD_DIR/win_dist"/wheels/*.whl; do
 done
 
 # sorgenti applicativi
-cp /Volumes/MicroSD/cantiere_navale_pro/main.py .
-cp -R /Volumes/MicroSD/cantiere_navale_pro/static .
+cp "$ROOT/main.py" .
+cp -R "$ROOT/static" .
 
 cat > "Avvia Cantiere Navale Pro.bat" <<'EOF'
 @echo off
