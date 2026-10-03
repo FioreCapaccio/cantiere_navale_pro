@@ -176,6 +176,27 @@ const insuranceBadge = date => {
   if (days <= 30) return `<span class="badge badge-amber">Scade tra ${days} gg</span>`;
   return `<span class="badge badge-green">Valida</span>`;
 };
+// badge generico per scadenze (patenti, visite, servizi…)
+const expiryBadge = (date, okLabel = "Ok") => {
+  if (!date) return "";
+  const days = Math.round((new Date(date) - new Date(todayISO())) / 86400000);
+  if (days < 0) return `<span class="badge badge-red">scaduta da ${-days} gg</span>`;
+  if (days <= 30) return `<span class="badge badge-amber">tra ${days} gg</span>`;
+  return `<span class="badge badge-green">${okLabel}</span>`;
+};
+// colonne di scadenza attive di un lavoratore (solo se scadute o imminenti)
+const workerExpiryBadges = w => {
+  const items = [
+    ["license_expiry", "Patente"],
+    ["medical_exam_expiry", "Visita"],
+    ["safety_training_expiry", "Sicurezza"],
+  ].map(([k, label]) => {
+    const b = expiryBadge(w[k]);
+    return b ? b.replace("</span>", ` — ${label}</span>`) : "";
+  }).filter(Boolean);
+  const problematic = items.filter(b => b.includes("badge-red") || b.includes("badge-amber"));
+  return problematic.length ? problematic.join(" ") : `<span class="badge badge-green">Scadenze ok</span>`;
+};
 
 /* ============ Modale ============ */
 
@@ -404,6 +425,19 @@ route(/^\/dashboard$/, async () => {
       </div>
     </div>
 
+    <div class="card">
+      <h2>${icon("alert", 15)} Scadenze in arrivo (60 gg)</h2>
+      <table class="tbl"><tbody>
+        ${d.expiries.length ? d.expiries.map(e => `
+          <tr>
+            <td class="primary">${esc(e.label)}<span class="sub">${e.kind === "barca" ? "Imbarcazione" : "Lavoratore"}</span></td>
+            <td class="num">${fmtDate(e.date)}</td>
+            <td>${expiryBadge(e.date)}</td>
+            <td class="num"><a href="#${esc(e.ref)}">Apri →</a></td>
+          </tr>`).join("") : `<tr class="empty-row"><td>Nessuna scadenza vicina — assicurazioni, servizi, patenti e visite sotto controllo 👍</td></tr>`}
+      </tbody></table>
+    </div>
+
     <div class="grid-2">
       <div class="card">
         <h2>${icon("box", 15)} Articoli sotto scorta</h2>
@@ -546,6 +580,8 @@ function clientModal(client = null, onSaved = null) {
       <div class="form-grid">
         ${field("phone", "Telefono", { value: c.phone })}
         ${field("mobile", "Cellulare", { value: c.mobile })}
+        ${field("secondary_phone", "Secondo telefono", { value: c.secondary_phone })}
+        ${field("website", "Sito web", { value: c.website, placeholder: "www…" })}
       </div>
       <div class="form-section">Sede</div>
       <div class="form-grid">
@@ -730,24 +766,54 @@ function boatModal(boat = null, presetClientId = null, onSaved = null) {
     title: boat ? `Modifica imbarcazione` : "Nuova imbarcazione",
     wide: true,
     body: `
+      <div class="form-section">Dati principali</div>
       <div class="form-grid">
         ${field("client_id", "Proprietario", { type: "select", required: true, options: `<option value="">— scegli cliente —</option>` +
           cache.clients.map(c => `<option value="${c.id}" ${b.client_id === c.id || (!boat && presetClientId === c.id) ? "selected" : ""}>${esc(c.name)}</option>`).join("") })}
         ${field("name", "Nome imbarcazione", { required: true, value: b.name })}
         ${field("boat_type", "Tipo", { value: b.boat_type, placeholder: "Vela, Motore, Gommone…" })}
-        ${field("length", "Lunghezza (m)", { type: "number", step: "any", min: 0, value: b.length ?? "" })}
-        ${field("registration", "Immatricolazione / Motore", { value: b.registration })}
+        ${field("model", "Modello", { value: b.model })}
+        ${field("builder", "Cantiere / Costruttore", { value: b.builder })}
         ${field("build_year", "Anno di costruzione", { type: "number", min: 1900, max: 2100, value: b.build_year ?? "" })}
+        ${field("flag", "Bandiera", { value: b.flag })}
+        ${field("home_port", "Porto d'iscrizione", { value: b.home_port })}
+        ${field("registration", "Immatricolazione", { value: b.registration })}
         ${field("hull_id", "Numero di scafo (HIN)", { value: b.hull_id })}
+      </div>
+      <div class="form-section">Scheda tecnica</div>
+      <div class="form-grid">
+        ${field("length", "Lunghezza (m)", { type: "number", step: "any", min: 0, value: b.length ?? "" })}
+        ${field("beam", "Baglio (m)", { type: "number", step: "any", min: 0, value: b.beam ?? "" })}
+        ${field("draft", "Pescaggio (m)", { type: "number", step: "any", min: 0, value: b.draft ?? "" })}
+        ${field("displacement", "Dislocamento (t)", { type: "number", step: "any", min: 0, value: b.displacement ?? "" })}
+        ${field("hull_material", "Materiale scafo", { value: b.hull_material, placeholder: "VTR, alluminio, acciaio…" })}
+        ${field("fuel_type", "Alimentazione", { value: b.fuel_type, placeholder: "Diesel, benzina…" })}
+      </div>
+      <div class="form-section">Motore</div>
+      <div class="form-grid">
+        ${field("engine_make", "Marca motore", { value: b.engine_make, placeholder: "Volvo Penta, Yanmar…" })}
+        ${field("engine_model", "Modello motore", { value: b.engine_model })}
+        ${field("engine_power_hp", "Potenza (CV)", { type: "number", step: "any", min: 0, value: b.engine_power_hp ?? "" })}
+        ${field("engine_hours", "Ore motore", { type: "number", step: "any", min: 0, value: b.engine_hours ?? "" })}
+        ${field("engine", "Note motore", { value: b.engine, full: true })}
+      </div>
+      <div class="form-section">Assicurazione e manutenzione</div>
+      <div class="form-grid">
+        ${field("insurance_company", "Compagnia assicurazione", { value: b.insurance_company })}
         ${field("insurance_expiry", "Scadenza assicurazione", { type: "date", value: b.insurance_expiry || "" })}
+        ${field("last_haul_out", "Ultimo varo / alaggio", { type: "date", value: b.last_haul_out || "" })}
+        ${field("next_service_date", "Prossimo servizio", { type: "date", value: b.next_service_date || "" })}
+        ${field("yard_position", "Posizione nello scalo", { value: b.yard_position, placeholder: "Bacino 2, alaggio est…" })}
         ${field("notes", "Note", { type: "textarea", value: b.notes, full: true })}
       </div>`,
     onSubmit: async fd => {
       const payload = Object.fromEntries(fd.entries());
       payload.client_id = parseInt(payload.client_id);
-      payload.length = payload.length === "" ? null : num(payload.length);
+      for (const k of ["length", "beam", "draft", "displacement", "engine_power_hp", "engine_hours"])
+        payload[k] = payload[k] === "" ? null : num(payload[k]);
       payload.build_year = payload.build_year === "" ? null : parseInt(payload.build_year);
-      payload.insurance_expiry = payload.insurance_expiry || null;
+      for (const k of ["insurance_expiry", "last_haul_out", "next_service_date"])
+        payload[k] = payload[k] || null;
       if (boat) await api("/boats/" + boat.id, { method: "PUT", json: payload });
       else await api("/boats", { method: "POST", json: payload });
       closeModal();
@@ -782,15 +848,34 @@ route(/^\/imbarcazioni\/(\d+)$/, async (id) => {
     ${d.insurance_expiry && (new Date(d.insurance_expiry) - new Date(todayISO())) / 86400000 <= 30
       ? `<div class="alert-banner warn">${icon("alert", 16)} Assicurazione in scadenza o scaduta il ${fmtDate(d.insurance_expiry)}</div>` : ""}
 
+    ${d.next_service_date && (new Date(d.next_service_date) - new Date(todayISO())) / 86400000 <= 30
+      ? `<div class="alert-banner warn">${icon("alert", 16)} Servizio programmato per il ${fmtDate(d.next_service_date)}</div>` : ""}
+
     <div class="card">
       <h2>${icon("anchor", 15)} Scheda tecnica</h2>
       <div class="detail-grid">
         ${infoBox("Tipo", esc(d.boat_type))}
-        ${infoBox("Lunghezza", d.length ? esc(d.length) + " m" : "")}
+        ${infoBox("Modello", esc(d.model))}
+        ${infoBox("Cantiere", esc(d.builder))}
         ${infoBox("Anno di costruzione", d.build_year || "")}
+        ${infoBox("Lunghezza", d.length ? fmtNum(d.length) + " m" : "")}
+        ${infoBox("Baglio", d.beam ? fmtNum(d.beam) + " m" : "")}
+        ${infoBox("Pescaggio", d.draft ? fmtNum(d.draft) + " m" : "")}
+        ${infoBox("Dislocamento", d.displacement ? fmtNum(d.displacement) + " t" : "")}
+        ${infoBox("Materiale scafo", esc(d.hull_material))}
         ${infoBox("Immatricolazione", esc(d.registration))}
         ${infoBox("Numero di scafo", esc(d.hull_id))}
-        ${infoBox("Scadenza assicurazione", fmtDate(d.insurance_expiry))}
+        ${infoBox("Bandiera", esc(d.flag))}
+        ${infoBox("Porto d'iscrizione", esc(d.home_port))}
+        ${infoBox("Posizione nello scalo", esc(d.yard_position))}
+        ${d.engine_make || d.engine_model || d.engine_power_hp ? infoBox("Motore",
+          [d.engine_make, d.engine_model].filter(Boolean).join(" ") +
+          (d.engine_power_hp ? ` — ${fmtNum(d.engine_power_hp)} CV` : "") +
+          (d.engine_hours != null && d.engine_hours !== "" ? ` — ${fmtNum(d.engine_hours)} h` : "")) : ""}
+        ${infoBox("Alimentazione", esc(d.fuel_type))}
+        ${infoBox("Assicurazione", (d.insurance_company ? esc(d.insurance_company) + " — " : "") + fmtDate(d.insurance_expiry))}
+        ${infoBox("Ultimo varo / alaggio", fmtDate(d.last_haul_out))}
+        ${infoBox("Prossimo servizio", fmtDate(d.next_service_date))}
         ${d.notes ? infoBox("Note", esc(d.notes)) : ""}
       </div>
     </div>
@@ -983,7 +1068,7 @@ route(/^\/commesse\/(\d+)$/, async (id) => {
             <tr>
               <td class="primary">${esc(j.description)}</td>
               <td>${esc(j.category)}</td>
-              <td>${badge(JOB_STATUS, j.status)}</td>
+              <td>${badge(JOB_STATUS, j.status)}${j.priority && j.priority !== "normale" ? ` <span class="badge ${j.priority === "urgente" ? "badge-red" : "badge-amber"}">${esc(j.priority)}</span>` : ""}</td>
               <td class="num">${fmtNum(j.qty)} ${esc(j.unit)}</td>
               <td class="num">${fmtEur(j.unit_cost)}</td>
               <td class="num">${fmtEur(j.unit_price)}</td>
@@ -1235,6 +1320,7 @@ function jobModal(projectId, job = null) {  const j = job || {};
         ${field("description", "Descrizione", { required: true, value: j.description, full: true })}
         ${field("category", "Categoria", { type: "select", id: "jb-cat", options: ["Manodopera", "Ricambi", "Materiali", "Noleggio", "Subappalto", "Altro"].map(c => `<option ${j.category === c ? "selected" : ""}>${c}</option>`).join("") })}
         ${field("status", "Stato", { type: "select", options: Object.keys(JOB_STATUS).map(s => `<option ${j.status === s ? "selected" : ""}>${s}</option>`).join("") })}
+        ${field("priority", "Priorità", { type: "select", options: ["bassa", "normale", "alta", "urgente"].map(p => `<option ${j.priority === p || (!job && p === "normale") ? "selected" : ""}>${p}</option>`).join("") })}
         ${field("qty", "Quantità", { type: "number", step: "any", min: 0, value: j.qty ?? 1 })}
         ${field("unit", "Unità", { value: j.unit || ((j.category ?? "Manodopera") === "Manodopera" ? "ore" : "pz"), id: "jb-unit" })}
         ${field("unit_cost", "Costo unitario (€)", { type: "number", step: "any", min: 0, value: j.unit_cost ?? 0 })}
@@ -2781,20 +2867,21 @@ route(/^\/lavoratori$/, async () => {
         <button data-v="-1" class="${workerFilterActive === -1 ? "active" : ""}">Tutti</button>
       </div>
       <table class="tbl">
-        <thead><tr><th>Lavoratore</th><th>Ruolo</th><th class="num">Costo/h</th><th class="num">Prezzo/h</th><th>Stato</th><th class="num">Azioni</th></tr></thead>
+        <thead><tr><th>Lavoratore</th><th>Ruolo</th><th class="num">Costo/h</th><th class="num">Prezzo/h</th><th>Scadenze</th><th>Stato</th><th class="num">Azioni</th></tr></thead>
         <tbody>
           ${workers.length ? workers.map(w => `
             <tr>
-              <td class="primary">${esc(w.name)}</td>
+              <td class="primary">${esc(w.name)}${w.employee_code ? `<span class="sub">matr. ${esc(w.employee_code)}</span>` : ""}</td>
               <td>${esc(w.role || "—")}</td>
               <td class="num">${fmtEur(w.hourly_cost)}</td>
               <td class="num">${fmtEur(w.hourly_price)}</td>
+              <td>${workerExpiryBadges(w)}</td>
               <td>${w.active ? `<span class="badge badge-green">Attivo</span>` : `<span class="badge badge-gray">Disattivo</span>`}</td>
               <td class="num"><div class="actions">
                 <button class="btn btn-sm" data-wedit="${w.id}">${icon("edit", 13)}</button>
                 <button class="btn btn-sm btn-danger" data-wdel="${w.id}">${icon("trash", 13)}</button>
               </div></td>
-            </tr>`).join("") : `<tr class="empty-row"><td colspan="6">Nessun lavoratore — creane uno per registrare le ore con il costo reale</td></tr>`}
+            </tr>`).join("") : `<tr class="empty-row"><td colspan="7">Nessun lavoratore — creane uno per registrare le ore con il costo reale</td></tr>`}
         </tbody>
       </table>
       <p style="color:var(--muted);font-size:12.5px;margin-top:10px">Il <b>costo/h</b> è quanto ti costa l'ora del lavoratore (entro il margine), il <b>prezzo/h</b> è quanto lo fatturi al cliente. Le ore registrate nelle commesse usano la tariffa del momento, anche se poi cambi le tariffe.</p>
@@ -2815,13 +2902,44 @@ function workerModal(worker = null) {
   const w = worker || {};
   modalForm({
     title: worker ? "Modifica lavoratore" : "Nuovo lavoratore",
+    wide: true,
     body: `
+      <div class="form-section">Dati principali</div>
       <div class="form-grid">
-        ${field("name", "Nome e cognome", { required: true, value: w.name, full: true })}
+        ${field("name", "Nome e cognome", { required: true, value: w.name })}
+        ${field("employee_code", "Matricola", { value: w.employee_code })}
         ${field("role", "Ruolo", { value: w.role, placeholder: "es. Meccanico, Carpentiere, Verniciatore" })}
+        ${field("phone", "Telefono", { value: w.phone })}
+        ${field("email", "Email", { type: "email", value: w.email })}
+        ${field("birth_date", "Data di nascita", { type: "date", value: w.birth_date || "" })}
+      </div>
+      <div class="form-section">Tariffe</div>
+      <div class="form-grid">
         ${field("hourly_cost", "Costo orario (€/h)", { type: "number", step: "any", min: 0, value: w.hourly_cost ?? 0 })}
         ${field("hourly_price", "Prezzo orario di fatturazione (€/h)", { type: "number", step: "any", min: 0, value: w.hourly_price ?? 0 })}
         ${field("active", "Stato", { type: "select", options: `<option value="true" ${w.active !== false ? "selected" : ""}>Attivo</option><option value="false" ${w.active === false ? "selected" : ""}>Disattivo</option>` })}
+      </div>
+      <div class="form-section">Contratto</div>
+      <div class="form-grid">
+        ${field("hire_date", "Data assunzione", { type: "date", value: w.hire_date || "" })}
+        ${field("contract_type", "Tipo contratto", { value: w.contract_type, placeholder: "CCNL, a tempo indeterminato…" })}
+        ${field("weekly_hours", "Ore settimanali", { type: "number", step: "any", min: 0, value: w.weekly_hours ?? "" })}
+        ${field("vacation_days", "Giorni ferie annui", { type: "number", step: "any", min: 0, value: w.vacation_days ?? "" })}
+        ${field("iban", "IBAN", { value: w.iban, full: true })}
+      </div>
+      <div class="form-section">Patenti, visite e sicurezza</div>
+      <div class="form-grid">
+        ${field("license", "Patente", { value: w.license, placeholder: "B, C, nautica, carrello elevatore…" })}
+        ${field("license_expiry", "Scadenza patente", { type: "date", value: w.license_expiry || "" })}
+        ${field("medical_exam_expiry", "Scadenza visita medica", { type: "date", value: w.medical_exam_expiry || "" })}
+        ${field("safety_training_expiry", "Scadenza corso sicurezza", { type: "date", value: w.safety_training_expiry || "" })}
+        ${field("skills", "Competenze", { value: w.skills, full: true, placeholder: "es. impiantistica elettrica, vela, gelcoat…" })}
+        ${field("certifications", "Certificazioni", { value: w.certifications, full: true, placeholder: "es. abilitazione lavori in quota, GFL…" })}
+      </div>
+      <div class="form-section">Emergenza e note</div>
+      <div class="form-grid">
+        ${field("emergency_contact", "Contatto di emergenza", { value: w.emergency_contact })}
+        ${field("emergency_phone", "Telefono emergenza", { value: w.emergency_phone })}
         ${field("notes", "Note", { type: "textarea", value: w.notes, full: true })}
       </div>`,
     onSubmit: async fd => {
@@ -2829,6 +2947,10 @@ function workerModal(worker = null) {
       payload.hourly_cost = num(payload.hourly_cost);
       payload.hourly_price = num(payload.hourly_price);
       payload.active = payload.active === "true";
+      for (const k of ["weekly_hours", "vacation_days"])
+        payload[k] = payload[k] === "" ? null : num(payload[k]);
+      for (const k of ["birth_date", "hire_date", "license_expiry", "medical_exam_expiry", "safety_training_expiry"])
+        payload[k] = payload[k] || null;
       if (worker) await api("/workers/" + worker.id, { method: "PUT", json: payload });
       else await api("/workers", { method: "POST", json: payload });
       closeModal(); toast("Lavoratore salvato", "success"); render();

@@ -207,6 +207,8 @@ class Client(Base):
     iban = Column(String, default="")
     payment_terms = Column(String, default="")  # condizioni di pagamento
     discount = Column(Float, default=0)         # sconto abituale %
+    website = Column(String, default="")
+    secondary_phone = Column(String, default="")  # secondo telefono
     active = Column(Boolean, default=True)
     notes = Column(String, default="")
     created_at = Column(DateTime, default=datetime.now)
@@ -229,6 +231,24 @@ class Boat(Base):
     hull_id = Column(String, default="")        # numero di scafo / HIN
     insurance_expiry = Column(SQLDate, nullable=True)
     notes = Column(String, default="")
+    # Scheda tecnica completa
+    builder = Column(String, default="")        # cantiere / costruttore
+    model = Column(String, default="")
+    hull_material = Column(String, default="")  # VTR, alluminio, acciaio…
+    beam = Column(Float, nullable=True)         # baglio (m)
+    draft = Column(Float, nullable=True)        # pescaggio (m)
+    displacement = Column(Float, nullable=True) # stazza (t)
+    engine_make = Column(String, default="")
+    engine_model = Column(String, default="")
+    engine_power_hp = Column(Float, nullable=True)
+    engine_hours = Column(Float, nullable=True)
+    fuel_type = Column(String, default="")      # benzina, diesel…
+    flag = Column(String, default="")
+    home_port = Column(String, default="")
+    insurance_company = Column(String, default="")
+    last_haul_out = Column(SQLDate, nullable=True)   # ultimo varo/settimo
+    next_service_date = Column(SQLDate, nullable=True)  # prossimo tagliando
+    yard_position = Column(String, default="")  # posizione nello scalo
 
     client = relationship("Client", back_populates="boats")
 
@@ -303,6 +323,7 @@ class Job(Base):
     description = Column(String, nullable=False)
     category = Column(String, default="Manodopera")
     status = Column(String, default="Da fare")  # Da fare, In corso, Completata
+    priority = Column(String, default="normale")  # bassa, normale, alta, urgente
     qty = Column(Float, default=1)
     unit = Column(String, default="pz")
     unit_cost = Column(Float, default=0)
@@ -464,6 +485,24 @@ class Worker(Base):
     hourly_price = Column(Float, default=0)    # prezzo orario di fatturazione (€/h)
     active = Column(Boolean, default=True)
     notes = Column(String, default="")
+    # Anagrafica e scadenze amministrative
+    employee_code = Column(String, default="")
+    birth_date = Column(SQLDate, nullable=True)
+    phone = Column(String, default="")
+    email = Column(String, default="")
+    iban = Column(String, default="")
+    hire_date = Column(SQLDate, nullable=True)
+    contract_type = Column(String, default="")  # es. CCNL Metalmeccanici, a tempo…
+    weekly_hours = Column(Float, nullable=True)
+    vacation_days = Column(Float, nullable=True)  # giorni ferie annui
+    license = Column(String, default="")        # patente: B, C, nautica, carrello…
+    license_expiry = Column(SQLDate, nullable=True)
+    medical_exam_expiry = Column(SQLDate, nullable=True)   # visita medica
+    safety_training_expiry = Column(SQLDate, nullable=True)  # corso sicurezza
+    skills = Column(String, default="")
+    certifications = Column(String, default="")
+    emergency_contact = Column(String, default="")
+    emergency_phone = Column(String, default="")
 
     entries = relationship("TimeEntry", back_populates="worker_ref")
 
@@ -610,6 +649,8 @@ class ClientCreate(BaseModel):
     iban: Optional[str] = ""
     payment_terms: Optional[str] = ""
     discount: Optional[float] = 0
+    website: Optional[str] = ""
+    secondary_phone: Optional[str] = ""
     active: Optional[bool] = True
     notes: Optional[str] = ""
 
@@ -639,6 +680,8 @@ class ClientOut(ORMModel):
     iban: str
     payment_terms: str
     discount: float
+    website: str
+    secondary_phone: str
     active: bool
     notes: str
 
@@ -654,6 +697,23 @@ class BoatCreate(BaseModel):
     hull_id: Optional[str] = ""
     insurance_expiry: Optional[Date] = None
     notes: Optional[str] = ""
+    builder: Optional[str] = ""
+    model: Optional[str] = ""
+    hull_material: Optional[str] = ""
+    beam: Optional[float] = None
+    draft: Optional[float] = None
+    displacement: Optional[float] = None
+    engine_make: Optional[str] = ""
+    engine_model: Optional[str] = ""
+    engine_power_hp: Optional[float] = None
+    engine_hours: Optional[float] = None
+    fuel_type: Optional[str] = ""
+    flag: Optional[str] = ""
+    home_port: Optional[str] = ""
+    insurance_company: Optional[str] = ""
+    last_haul_out: Optional[Date] = None
+    next_service_date: Optional[Date] = None
+    yard_position: Optional[str] = ""
 
 
 class BoatUpdate(BoatCreate):
@@ -672,6 +732,23 @@ class BoatOut(ORMModel):
     hull_id: str
     insurance_expiry: Optional[Date]
     notes: str
+    builder: str
+    model: str
+    hull_material: str
+    beam: Optional[float]
+    draft: Optional[float]
+    displacement: Optional[float]
+    engine_make: str
+    engine_model: str
+    engine_power_hp: Optional[float]
+    engine_hours: Optional[float]
+    fuel_type: str
+    flag: str
+    home_port: str
+    insurance_company: str
+    last_haul_out: Optional[Date]
+    next_service_date: Optional[Date]
+    yard_position: str
 
 
 class WarehouseCreate(BaseModel):
@@ -761,6 +838,7 @@ class JobCreate(BaseModel):
     description: str
     category: Optional[str] = "Manodopera"
     status: Optional[str] = "Da fare"
+    priority: Optional[str] = "normale"
     qty: Optional[float] = 1
     unit: Optional[str] = "pz"
     unit_cost: Optional[float] = 0
@@ -778,6 +856,7 @@ class JobOut(ORMModel):
     description: str
     category: str
     status: str
+    priority: str
     qty: float
     unit: str
     unit_cost: float
@@ -1073,6 +1152,23 @@ class WorkerCreate(BaseModel):
     hourly_price: Optional[float] = 0
     active: Optional[bool] = True
     notes: Optional[str] = ""
+    employee_code: Optional[str] = ""
+    birth_date: Optional[Date] = None
+    phone: Optional[str] = ""
+    email: Optional[str] = ""
+    iban: Optional[str] = ""
+    hire_date: Optional[Date] = None
+    contract_type: Optional[str] = ""
+    weekly_hours: Optional[float] = None
+    vacation_days: Optional[float] = None
+    license: Optional[str] = ""
+    license_expiry: Optional[Date] = None
+    medical_exam_expiry: Optional[Date] = None
+    safety_training_expiry: Optional[Date] = None
+    skills: Optional[str] = ""
+    certifications: Optional[str] = ""
+    emergency_contact: Optional[str] = ""
+    emergency_phone: Optional[str] = ""
 
 
 class WorkerOut(ORMModel):
@@ -1083,6 +1179,23 @@ class WorkerOut(ORMModel):
     hourly_price: float
     active: bool
     notes: str
+    employee_code: str
+    birth_date: Optional[Date]
+    phone: str
+    email: str
+    iban: str
+    hire_date: Optional[Date]
+    contract_type: str
+    weekly_hours: Optional[float]
+    vacation_days: Optional[float]
+    license: str
+    license_expiry: Optional[Date]
+    medical_exam_expiry: Optional[Date]
+    safety_training_expiry: Optional[Date]
+    skills: str
+    certifications: str
+    emergency_contact: str
+    emergency_phone: str
 
 
 class PurchaseOrderLineCreate(BaseModel):
@@ -1413,6 +1526,8 @@ _MIGRATIONS = {
         ("active", "BOOLEAN DEFAULT 1"),
         ("notes", "VARCHAR DEFAULT ''"),
         ("created_at", "DATETIME"),
+        ("website", "VARCHAR DEFAULT ''"),
+        ("secondary_phone", "VARCHAR DEFAULT ''"),
     ],
     "boats": [
         ("length", "FLOAT"),
@@ -1421,6 +1536,45 @@ _MIGRATIONS = {
         ("hull_id", "VARCHAR DEFAULT ''"),
         ("insurance_expiry", "DATE"),
         ("notes", "VARCHAR DEFAULT ''"),
+        ("builder", "VARCHAR DEFAULT ''"),
+        ("model", "VARCHAR DEFAULT ''"),
+        ("hull_material", "VARCHAR DEFAULT ''"),
+        ("beam", "FLOAT"),
+        ("draft", "FLOAT"),
+        ("displacement", "FLOAT"),
+        ("engine_make", "VARCHAR DEFAULT ''"),
+        ("engine_model", "VARCHAR DEFAULT ''"),
+        ("engine_power_hp", "FLOAT"),
+        ("engine_hours", "FLOAT"),
+        ("fuel_type", "VARCHAR DEFAULT ''"),
+        ("flag", "VARCHAR DEFAULT ''"),
+        ("home_port", "VARCHAR DEFAULT ''"),
+        ("insurance_company", "VARCHAR DEFAULT ''"),
+        ("last_haul_out", "DATE"),
+        ("next_service_date", "DATE"),
+        ("yard_position", "VARCHAR DEFAULT ''"),
+    ],
+    "workers": [
+        ("employee_code", "VARCHAR DEFAULT ''"),
+        ("birth_date", "DATE"),
+        ("phone", "VARCHAR DEFAULT ''"),
+        ("email", "VARCHAR DEFAULT ''"),
+        ("iban", "VARCHAR DEFAULT ''"),
+        ("hire_date", "DATE"),
+        ("contract_type", "VARCHAR DEFAULT ''"),
+        ("weekly_hours", "FLOAT"),
+        ("vacation_days", "FLOAT"),
+        ("license", "VARCHAR DEFAULT ''"),
+        ("license_expiry", "DATE"),
+        ("medical_exam_expiry", "DATE"),
+        ("safety_training_expiry", "DATE"),
+        ("skills", "VARCHAR DEFAULT ''"),
+        ("certifications", "VARCHAR DEFAULT ''"),
+        ("emergency_contact", "VARCHAR DEFAULT ''"),
+        ("emergency_phone", "VARCHAR DEFAULT ''"),
+    ],
+    "jobs": [
+        ("priority", "VARCHAR DEFAULT 'normale'"),
     ],
     "documents": [
         ("created_by", "VARCHAR DEFAULT ''"),
@@ -1618,6 +1772,26 @@ def dashboard(db: Session = Depends(get_db), _: User = Depends(get_current_user)
             "start_date": b.start_date, "end_date": b.end_date, "status": b.status,
         })
 
+    # Scadenze in arrivo (60 gg, incluse le già scadute): assicurazioni e
+    # servizi delle barche, patenti/visite/corsi dei lavoratori
+    horizon = today + timedelta(days=60)
+    expiries = []
+    for b in db.query(Boat).all():
+        if b.insurance_expiry and b.insurance_expiry <= horizon:
+            expiries.append({"kind": "barca", "label": f"Assicurazione {b.name}",
+                             "date": b.insurance_expiry, "ref": f"/imbarcazioni/{b.id}"})
+        if b.next_service_date and b.next_service_date <= horizon:
+            expiries.append({"kind": "barca", "label": f"Servizio {b.name}",
+                             "date": b.next_service_date, "ref": f"/imbarcazioni/{b.id}"})
+    for w in db.query(Worker).filter(Worker.active == True).all():  # noqa: E712
+        for fld, label in [("license_expiry", "Patente"), ("medical_exam_expiry", "Visita medica"),
+                           ("safety_training_expiry", "Corso sicurezza")]:
+            d = getattr(w, fld)
+            if d and d <= horizon:
+                expiries.append({"kind": "lavoratore", "label": f"{label} {w.name}",
+                                 "date": d, "ref": "/lavoratori"})
+    expiries.sort(key=lambda e: e["date"])
+
     return {
         "clients": db.query(Client).filter(Client.active == True).count(),  # noqa: E712
         "inactive_clients": db.query(Client).filter(Client.active == False).count(),  # noqa: E712
@@ -1634,6 +1808,7 @@ def dashboard(db: Session = Depends(get_db), _: User = Depends(get_current_user)
         "overdue": overdue_rows[:5],
         "low_stock": low_stock,
         "agenda_alerts": agenda_alerts,
+        "expiries": expiries[:8],
         "upcoming": [
             {
                 "id": p.id, "number": p.number, "title": p.title,
