@@ -276,6 +276,17 @@ function confirmDialog(message, onConfirm, confirmLabel = "Elimina") {
   $("#cf-ok").onclick = async () => { closeModal(); await onConfirm(); };
 }
 
+/* Eliminazione con conferma: mostra l'esito (o il motivo del rifiuto) e poi esegue `after` */
+function deleteRecord({ url, message, done, after, label = "Elimina" }) {
+  confirmDialog(message, async () => {
+    try {
+      await api(url, { method: "DELETE" });
+      toast(done, "success");
+      after();
+    } catch (err) { toast(err.message, "error"); }
+  }, label);
+}
+
 function showError(err) {
   const box = $("#mf-error");
   if (box) { box.textContent = err.message; box.classList.remove("hidden"); }
@@ -607,9 +618,11 @@ route(/^\/clienti$/, async () => {
         <td class="num"><div class="actions">
           <a class="btn btn-sm" href="#/clienti/${c.id}">${icon("eye", 13)} Apri</a>
           <button class="btn btn-sm" data-edit="${c.id}">${icon("edit", 13)}</button>
+          <button class="btn btn-sm btn-danger" data-cdel="${c.id}" title="Elimina cliente">${icon("trash", 13)}</button>
         </div></td>
       </tr>`).join("") : `<tr class="empty-row"><td colspan="6">Nessun cliente</td></tr>`;
     $$("[data-edit]", $("#client-table")).forEach(b => b.onclick = () => clientModal(clients.find(c => c.id == b.dataset.edit)));
+    $$("[data-cdel]", $("#client-table")).forEach(b => b.onclick = () => askDeleteClient(clients.find(c => c.id == b.dataset.cdel), () => render()));
   };
   paint();
   $("#client-search").oninput = e => paint(e.target.value);
@@ -675,6 +688,14 @@ function clientModal(client = null, onSaved = null) {
   });
 }
 
+function askDeleteClient(c, after) {
+  deleteRecord({
+    url: "/clients/" + c.id,
+    message: `Eliminare il cliente “${c.name}”? Verranno eliminate anche le sue imbarcazioni e commesse. Se ha documenti non si può eliminare: in quel caso disattivalo dalla scheda.`,
+    done: "Cliente eliminato", after,
+  });
+}
+
 /* ---- Scheda cliente ---- */
 
 route(/^\/clienti\/(\d+)$/, async (id) => {
@@ -698,6 +719,7 @@ route(/^\/clienti\/(\d+)$/, async (id) => {
       </div>
       <div class="head-actions">
         <button class="btn" id="c-edit">${icon("edit", 14)} Modifica</button>
+        <button class="btn btn-danger" id="c-del" title="Elimina cliente">${icon("trash", 14)}</button>
         <button class="btn" id="c-boat">${icon("anchor", 14)} Imbarcazione</button>
         <button class="btn btn-primary" id="c-doc">${icon("plus", 14)} Documento</button>
       </div>
@@ -776,6 +798,7 @@ route(/^\/clienti\/(\d+)$/, async (id) => {
     </div>`;
 
   $("#c-edit").onclick = () => clientModal(d, () => render());
+  $("#c-del").onclick = () => askDeleteClient(d, () => { location.hash = "#/clienti"; });
   $("#c-boat").onclick = () => boatModal(null, parseInt(id));
   $("#c-doc").onclick = () => documentModal(null, parseInt(id));
 });
@@ -813,14 +836,24 @@ route(/^\/imbarcazioni$/, async () => {
         <td class="num"><div class="actions">
           <a class="btn btn-sm" href="#/imbarcazioni/${b.id}">${icon("eye", 13)} Apri</a>
           <button class="btn btn-sm" data-edit="${b.id}">${icon("edit", 13)}</button>
+          <button class="btn btn-sm btn-danger" data-bdel-boat="${b.id}" title="Elimina imbarcazione">${icon("trash", 13)}</button>
         </div></td>
       </tr>`).join("") : `<tr class="empty-row"><td colspan="6">Nessuna imbarcazione</td></tr>`;
     $$("[data-edit]", $("#boat-table")).forEach(btn => btn.onclick = () => boatModal(boats.find(x => x.id == btn.dataset.edit)));
+    $$("[data-bdel-boat]", $("#boat-table")).forEach(btn => btn.onclick = () => askDeleteBoat(boats.find(x => x.id == btn.dataset.bdelBoat), () => render()));
   };
   paint();
   $("#boat-search").oninput = e => paint(e.target.value);
   $("#add-boat").onclick = () => boatModal();
 });
+
+function askDeleteBoat(b, after) {
+  deleteRecord({
+    url: "/boats/" + b.id,
+    message: `Eliminare l'imbarcazione “${b.name}”? Le commesse e le prenotazioni collegate restano, ma senza imbarcazione.`,
+    done: "Imbarcazione eliminata", after,
+  });
+}
 
 function boatModal(boat = null, presetClientId = null, onSaved = null) {
   const b = boat || {};
@@ -903,6 +936,7 @@ route(/^\/imbarcazioni\/(\d+)$/, async (id) => {
       </div>
       <div class="head-actions">
         <button class="btn" id="b-edit">${icon("edit", 14)} Modifica</button>
+        <button class="btn btn-danger" id="b-del" title="Elimina imbarcazione">${icon("trash", 14)}</button>
         <button class="btn btn-primary" id="b-project">${icon("plus", 14)} Commessa</button>
       </div>
     </div>
@@ -968,6 +1002,7 @@ route(/^\/imbarcazioni\/(\d+)$/, async (id) => {
     </div>`;
 
   $("#b-edit").onclick = () => boatModal(d, null, () => render());
+  $("#b-del").onclick = () => askDeleteBoat(d, () => { location.hash = "#/imbarcazioni"; });
   $("#b-project").onclick = () => projectModal(null, null, null, parseInt(id));
 });
 
@@ -1675,6 +1710,7 @@ route(/^\/documenti$/, async () => {
               <td class="num"><b>${fmtEur(docTot(x))}</b></td>
               <td class="num"><div class="actions">
                 <a class="btn btn-sm" href="#/documenti/${x.id}">${icon("eye", 13)} Apri</a>
+                ${canDeleteDoc(x) ? `<button class="btn btn-sm btn-danger" data-ddel="${x.id}" title="Elimina documento">${icon("trash", 13)}</button>` : ""}
               </div></td>
             </tr>`).join("") : `<tr class="empty-row"><td colspan="7">Nessun documento con questi filtri</td></tr>`}
         </tbody>
@@ -1692,9 +1728,20 @@ route(/^\/documenti$/, async () => {
   let dt = null;
   $("#f-q").oninput = e => { clearTimeout(dt); dt = setTimeout(onFilter, 350); };
   if ($("#f-reset")) $("#f-reset").onclick = () => { docFilter = { kind: "", status: "", client_id: "", year: "", q: "" }; render(); };
+  $$("[data-ddel]").forEach(b => b.onclick = () => askDeleteDoc(docs.find(x => x.id == b.dataset.ddel), () => render()));
   $("#add-doc").onclick = () => documentModal();
   $("#export-docs").onclick = () => downloadFile("/documents/export", "documenti.csv");
 });
+
+/* Le fatture emesse non si cancellano (si annullano); DDT e proforma sì, se non incassati */
+const canDeleteDoc = d => d.kind === "Fattura" ? d.status === "bozza" : !d.paid;
+function askDeleteDoc(d, after) {
+  deleteRecord({
+    url: "/documents/" + d.id,
+    message: `Eliminare definitivamente ${d.kind} ${d.number}?`,
+    done: "Documento eliminato", after,
+  });
+}
 
 function docFilterActive() { return Object.values(docFilter).some(v => v !== ""); }
 function docQueryString() {
@@ -1826,7 +1873,7 @@ route(/^\/documenti\/(\d+)$/, async (id) => {
         ${doc.status === "archiviata" ? `<button class="btn" id="d-unarchive">Riattiva</button>` : ""}
         ${doc.status === "annullata" ? `<button class="btn" id="d-unarchive">Ripristina come bozza</button>` : ""}
         <button class="btn" id="d-print">${icon("printer", 14)} Stampa</button>
-        ${doc.status === "bozza" ? `<button class="btn btn-danger" id="d-del">${icon("trash", 14)}</button>` : ""}
+        ${canDeleteDoc(doc) ? `<button class="btn btn-danger" id="d-del" title="Elimina documento">${icon("trash", 14)}</button>` : ""}
       </div>
     </div>
 
@@ -1978,10 +2025,7 @@ route(/^\/documenti\/(\d+)$/, async (id) => {
     try { await api(`/documents/${id}/status?status_value=${target}`, { method: "POST" }); toast("Documento riattivato", "success"); render(); }
     catch (err) { toast(err.message, "error"); }
   };
-  if ($("#d-del")) $("#d-del").onclick = () => confirmDialog("Eliminare definitivamente questo documento? (solo bozze)", async () => {
-    try { await api("/documents/" + id, { method: "DELETE" }); toast("Documento eliminato", "success"); location.hash = "#/documenti"; }
-    catch (err) { toast(err.message, "error"); }
-  });
+  if ($("#d-del")) $("#d-del").onclick = () => askDeleteDoc(doc, () => { location.hash = "#/documenti"; });
   $("#d-print").onclick = () => printDocument(doc, client, s);
   if ($("#d-edit")) $("#d-edit").onclick = () => documentEditModal(doc);
 });
@@ -2884,8 +2928,9 @@ async function setBookingStatus(id, status) {
   catch (err) { toast(err.message, "error"); }
 }
 
-function bookingModal(booking = null, onSaved = null, _unused = null, resources = null) {
-  const b = booking || {};
+function bookingModal(preset = null, onSaved = null, _unused = null, resources = null) {
+  const b = preset || {};
+  const booking = b.id ? b : null;  // senza id è una nuova prenotazione (data precompilata dal calendario)
   Promise.all([
     resources ? Promise.resolve(resources) : api("/resources"),
     api("/projects"),

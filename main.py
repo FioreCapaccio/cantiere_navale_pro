@@ -1755,7 +1755,7 @@ def sanitize_filename(name: str) -> str:
 
 from sqlalchemy import text as SQLText
 
-app = FastAPI(title="Cantiere Navale Pro", version="2.3")
+app = FastAPI(title="Cantiere Navale Pro", version="2.4")
 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -2289,10 +2289,15 @@ def delete_client(client_id: int, db: Session = Depends(get_db), _: User = Depen
     if db.query(Document).filter(Document.client_id == client_id).count():
         raise HTTPException(status_code=400, detail="Il cliente ha documenti collegati: eliminarli prima")
 
-    for boat in db.query(Boat).filter(Boat.client_id == client_id).all():
-        db.delete(boat)
+    # prima le commesse (con lavori, ore, allegati), poi le imbarcazioni
     for project in db.query(Project).filter(Project.client_id == client_id).all():
         delete_project_objects(db, project)
+        db.delete(project)
+    db.flush()
+    for boat in db.query(Boat).filter(Boat.client_id == client_id).all():
+        db.query(Project).filter(Project.boat_id == boat.id).update({Project.boat_id: None})
+        db.query(Booking).filter(Booking.boat_id == boat.id).update({Booking.boat_id: None})
+        db.delete(boat)
     db.delete(client)
     db.commit()
     return Response(status_code=204)
@@ -3373,11 +3378,19 @@ def set_document_status(
 
 @app.delete("/documents/{document_id}", status_code=204)
 def delete_document(document_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
+    """Le fatture si eliminano solo in bozza (poi si annullano: la numerazione
+    deve restare continua). DDT e proforma si possono eliminare se non incassati."""
     doc = db.get(Document, document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Documento non trovato")
-    if doc.status != "bozza":
-        raise HTTPException(status_code=400, detail="Solo i documenti in bozza possono essere eliminati")
+    if doc.kind == "Fattura" and doc.status != "bozza":
+        raise HTTPException(
+            status_code=400,
+            detail="Una fattura già emessa non si elimina: annullala (resta in archivio per la numerazione)")
+    if doc.payments:
+        raise HTTPException(status_code=400, detail="Il documento ha pagamenti registrati: eliminali prima")
+    # i documenti generati da questo (es. la fattura nata da un DDT) restano, scollegati
+    db.query(Document).filter(Document.source_document_id == doc.id).update({Document.source_document_id: None})
     db.delete(doc)
     db.commit()
     return Response(status_code=204)
