@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.total_clients }}</div>
+        <div class="stat-label">Clienti</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.total_boats }}</div>
+        <div class="stat-label">Imbarcazioni</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.active_orders }}</div>
+        <div class="stat-label">Commesse Attive</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.low_stock }}</div>
+        <div class="stat-label">Scorte Basse</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.open_documents }}</div>
+        <div class="stat-label">Documenti Aperti</div>
+    </div>
+</div>
+
+<div class="dashboard-section">
+    <h2>Ultime Commesse</h2>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Numero</th>
+                <th>Cliente</th>
+                <th>Imbarcazione</th>
+                <th>Stato</th>
+                <th>Azioni</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for order in recent_orders %}
+            <tr>
+                <td>{{ order.order_number }}</td>
+                <td>{{ order.client.name }}</td>
+                <td>{{ order.boat.name }}</td>
+                <td><span class="badge badge-{{ order.status|lower }}">{{ order.status }}</span></td>
+                <td><a href="{{ url_for('view_order', id=order.id) }}" class="btn btn-sm">Dettagli</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if low_stock_items %}
+<div class="dashboard-section">
+    <h2>⚠️ Scorte Basse</h2>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Articolo</th>
+                <th>Giacenza</th>
+                <th>Minimo</th>
+                <th>Magazzino</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in low_stock_items %}
+            <tr>
+                <td>{{ item.name }}</td>
+                <td>{{ item.quantity }}</td>
+                <td>{{ item.min_quantity }}</td>
+                <td>{{ item.warehouse.name }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

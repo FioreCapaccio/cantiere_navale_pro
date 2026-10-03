@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cantiere Navale Pro</title>
+  <link rel="stylesheet" href="/static/css/style.css?v=5">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚓</text></svg>">
+</head>
+<body>
+
+  <!-- Login -->
+  <div id="login-screen" class="login-screen hidden">
+    <div class="login-card">
+      <div class="login-logo">
+        <svg viewBox="0 0 24 24" width="46" height="46" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><path d="M12 22V8"/><path d="M5 12H2a10 10 0 0 0 20 0h-3"/></svg>
+      </div>
+      <h1>Cantiere Navale Pro</h1>
+      <p class="login-sub">Gestionale cantieristico</p>
+      <form id="login-form">
+        <label>Username
+          <input type="text" id="login-username" autocomplete="username" required>
+        </label>
+        <label>Password
+          <input type="password" id="login-password" autocomplete="current-password" required>
+        </label>
+        <div id="login-error" class="form-error hidden"></div>
+        <button type="submit" class="btn btn-primary btn-block">Accedi</button>
+      </form>
+      <p class="login-hint">Primo avvio: utente <b>admin</b> password <b>admin123</b> (cambiala in Impostazioni)</p>
+    </div>
+  </div>
+
+  <!-- App -->
+  <div id="app-screen" class="app hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-mark">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><path d="M12 22V8"/><path d="M5 12H2a10 10 0 0 0 20 0h-3"/></svg>
+        </span>
+        <span>Cantiere Navale <b>Pro</b></span>
+      </div>
+      <nav class="sidebar-nav" id="main-nav">
+        <a href="#/dashboard" data-nav="dashboard">Dashboard</a>
+        <div class="nav-group">Anagrafiche</div>
+        <a href="#/clienti" data-nav="clienti">Clienti</a>
+        <a href="#/imbarcazioni" data-nav="imbarcazioni">Imbarcazioni</a>
+        <a href="#/lavoratori" data-nav="lavoratori">Lavoratori</a>
+        <div class="nav-group">Operativo</div>
+        <a href="#/commesse" data-nav="commesse">Commesse</a>
+        <a href="#/agenda" data-nav="agenda">Agenda scalo</a>
+        <a href="#/magazzino" data-nav="magazzino">Magazzino</a>
+        <div class="nav-group">Amministrazione</div>
+        <a href="#/documenti" data-nav="documenti">Documenti</a>
+        <a href="#/scadenzario" data-nav="scadenzario">Scadenzario</a>
+        <a href="#/acquisti" data-nav="acquisti">Acquisti</a>
+        <a href="#/archivio" data-nav="archivio">Archivio</a>
+        <div class="nav-group">Sistema</div>
+        <a href="#/impostazioni" data-nav="impostazioni">Impostazioni</a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="sidebar-user" id="sidebar-user"></div>
+        <button class="btn btn-ghost btn-sm" id="logout-btn">Esci</button>
+      </div>
+    </aside>
+
+    <div class="main-col">
+      <header class="topbar">
+        <div class="search-wrap">
+          <span class="search-icon"></span>
+          <input type="text" id="global-search" placeholder="Cerca clienti, imbarcazioni, commesse, documenti…" autocomplete="off">
+          <div id="search-results" class="search-results hidden"></div>
+        </div>
+        <div class="topbar-right" id="topbar-user"></div>
+      </header>
+      <main class="main">
+        <div id="view"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Modale -->
+  <div id="modal-root" class="modal-overlay hidden">
+    <div class="modal" id="modal-box"></div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast-root"></div>
+
+  <!-- Area di stampa -->
+  <div id="print-area" class="print-area"></div>
+
+  <script src="/static/js/app.js?v=5"></script>
+</body>
+</html>
