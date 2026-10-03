@@ -80,6 +80,14 @@ Il pacchetto include Python: sul PC Windows **non serve installare nulla**.
   eliminazioni riservate a manager e amministratori, backup automatico giornaliero (ultimi 14) in
   `backups/`, limite di 100 MB sui file caricati, allegati ritrovati anche se sposti la cartella dati.
 
+## Archivio e temi
+
+- **Archivio**: ogni file ha una casella di selezione (più "seleziona tutti"): si possono eliminare solo
+  i file scelti con un clic. Una cartella con file si elimina insieme al contenuto, dopo conferma.
+  Le cancellazioni sono riservate a manager e amministratori.
+- **Temi**: dal selettore in alto a destra si passa tra **Chiaro**, **Scuro** e **Blu marine**;
+  la scelta resta memorizzata nel browser.
+
 ## Test
 
 ```bash

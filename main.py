@@ -1755,7 +1755,7 @@ def sanitize_filename(name: str) -> str:
 
 from sqlalchemy import text as SQLText
 
-app = FastAPI(title="Cantiere Navale Pro", version="2.2")
+app = FastAPI(title="Cantiere Navale Pro", version="2.3")
 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -3649,13 +3649,30 @@ def update_archive_folder(folder_id: int, payload: ArchiveFolderCreate, db: Sess
     return row
 
 
+def _remove_archive_file(db: Session, att: ArchiveFile):
+    try:
+        os.remove(resolve_stored_path(att.stored_path))
+    except OSError:
+        pass
+    db.delete(att)
+
+
 @app.delete("/archive/folders/{folder_id}", status_code=204)
-def delete_archive_folder(folder_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_archive_folder(
+    folder_id: int,
+    with_files: bool = False,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_manager)
+):
+    """Elimina una cartella. Se contiene file serve with_files=true (li cancella con lei)."""
     folder = db.get(ArchiveFolder, folder_id)
     if not folder:
         raise HTTPException(status_code=404, detail="Cartella non trovata")
-    if db.query(ArchiveFile).filter(ArchiveFile.folder_id == folder_id).count():
+    files = db.query(ArchiveFile).filter(ArchiveFile.folder_id == folder_id).all()
+    if files and not with_files:
         raise HTTPException(status_code=400, detail="La cartella contiene file: svuotala prima")
+    for att in files:
+        _remove_archive_file(db, att)
     db.delete(folder)
     db.commit()
     return Response(status_code=204)
@@ -3718,16 +3735,26 @@ def download_archive_file(file_id: int, db: Session = Depends(get_db), _: User =
     return FileResponse(path, filename=att.filename, media_type=att.content_type)
 
 
+class BulkDelete(BaseModel):
+    ids: List[int] = Field(min_length=1, max_length=1000)
+
+
+@app.post("/archive/files/bulk-delete")
+def bulk_delete_archive_files(payload: BulkDelete, db: Session = Depends(get_db), _: User = Depends(require_manager)):
+    """Cancellazione selettiva: elimina solo i file indicati (anche da cartelle diverse)."""
+    files = db.query(ArchiveFile).filter(ArchiveFile.id.in_(set(payload.ids))).all()
+    for att in files:
+        _remove_archive_file(db, att)
+    db.commit()
+    return {"deleted": len(files), "requested": len(set(payload.ids))}
+
+
 @app.delete("/archive/files/{file_id}", status_code=204)
-def delete_archive_file(file_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_archive_file(file_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     att = db.get(ArchiveFile, file_id)
     if not att:
         raise HTTPException(status_code=404, detail="File non trovato")
-    try:
-        os.remove(resolve_stored_path(att.stored_path))
-    except OSError:
-        pass
-    db.delete(att)
+    _remove_archive_file(db, att)
     db.commit()
     return Response(status_code=204)
 

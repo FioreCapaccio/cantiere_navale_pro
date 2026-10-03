@@ -2169,6 +2169,7 @@ route(/^\/scadenzario$/, async () => {
 /* ============ Archivio documentale ============ */
 
 let archiveFolderId = null;
+const archiveSelected = new Set();
 let archiveQuery = "";
 
 route(/^\/archivio$/, async () => {
@@ -2201,7 +2202,7 @@ route(/^\/archivio$/, async () => {
               <button class="btn btn-sm" data-fedit="${f.id}" title="Rinomina" style="margin-left:6px;padding:2px 6px">${icon("edit", 12)}</button>
             </div>`).join("") : `<p style="color:var(--muted)">Nessuna cartella: creane una</p>`}
         </div>
-        ${currentFolder && currentFolder.file_count === 0 ? `<div style="margin-top:14px"><button class="btn btn-sm btn-danger" id="del-folder">${icon("trash", 13)} Elimina cartella vuota</button></div>` : ""}
+        ${currentFolder ? `<div style="margin-top:14px"><button class="btn btn-sm btn-danger" id="del-folder">${icon("trash", 13)} Elimina cartella${currentFolder.file_count ? " e contenuto" : ""}</button></div>` : ""}
       </div>
       <div class="card">
         <h2>${icon("file", 15)} File ${currentFolder ? `— ${esc(currentFolder.name)}` : ""} <span class="count">${files.length}</span></h2>
@@ -2209,11 +2210,17 @@ route(/^\/archivio$/, async () => {
           <input type="text" id="arc-search" placeholder="Cerca file o note…" value="${esc(archiveQuery)}">
           <input type="file" id="arc-file" class="hidden">
         </div>
+        <div class="bulk-bar ${archiveSelected.size ? "" : "hidden"}" id="bulk-bar">
+          <span id="bulk-count">${archiveSelected.size} selezionat${archiveSelected.size === 1 ? "o" : "i"}</span>
+          <button class="btn btn-sm btn-danger" id="bulk-del">${icon("trash", 13)} Elimina selezionati</button>
+          <button class="btn btn-sm" id="bulk-clear">Deseleziona</button>
+        </div>
         <table class="tbl">
-          <thead><tr><th>Nome</th><th>Note</th><th>Dimensione</th><th>Caricato</th><th class="num">Azioni</th></tr></thead>
+          <thead><tr><th class="sel"><input type="checkbox" id="sel-all" title="Seleziona tutti" ${files.length && files.every(f => archiveSelected.has(f.id)) ? "checked" : ""}></th><th>Nome</th><th>Note</th><th>Dimensione</th><th>Caricato</th><th class="num">Azioni</th></tr></thead>
           <tbody>
             ${files.length ? files.map(a => `
-              <tr>
+              <tr class="${archiveSelected.has(a.id) ? "selected" : ""}">
+                <td class="sel"><input type="checkbox" data-sel="${a.id}" ${archiveSelected.has(a.id) ? "checked" : ""}></td>
                 <td class="primary">${icon("file", 14)} ${esc(a.filename)}</td>
                 <td>${esc(a.notes || "—")}</td>
                 <td>${fmtSize(a.file_size)}</td>
@@ -2222,13 +2229,42 @@ route(/^\/archivio$/, async () => {
                   <button class="btn btn-sm" data-dl="${a.id}">${icon("download", 13)} Scarica</button>
                   <button class="btn btn-sm btn-danger" data-rm="${a.id}">${icon("trash", 13)}</button>
                 </div></td>
-              </tr>`).join("") : `<tr class="empty-row"><td colspan="5">Nessun file ${archiveQuery ? "per la ricerca" : "in questa cartella"}</td></tr>`}
+              </tr>`).join("") : `<tr class="empty-row"><td colspan="6">Nessun file ${archiveQuery ? "per la ricerca" : "in questa cartella"}</td></tr>`}
           </tbody>
         </table>
       </div>
     </div>`;
 
-  $$(".folder-item").forEach(f => f.onclick = () => { archiveFolderId = parseInt(f.dataset.folder); archiveQuery = ""; render(); });
+  $$(".folder-item").forEach(f => f.onclick = () => { archiveFolderId = parseInt(f.dataset.folder); archiveQuery = ""; archiveSelected.clear(); render(); });
+
+  // selezione multipla dei file e cancellazione selettiva
+  const refreshBulk = () => {
+    $("#bulk-bar").classList.toggle("hidden", !archiveSelected.size);
+    $("#bulk-count").textContent = `${archiveSelected.size} selezionat${archiveSelected.size === 1 ? "o" : "i"}`;
+    $("#sel-all").checked = files.length > 0 && files.every(f => archiveSelected.has(f.id));
+    $$("[data-sel]").forEach(c => c.closest("tr").classList.toggle("selected", c.checked));
+  };
+  $$("[data-sel]").forEach(c => c.onchange = () => {
+    const id = parseInt(c.dataset.sel);
+    if (c.checked) archiveSelected.add(id); else archiveSelected.delete(id);
+    refreshBulk();
+  });
+  $("#sel-all").onchange = e => {
+    files.forEach(f => e.target.checked ? archiveSelected.add(f.id) : archiveSelected.delete(f.id));
+    $$("[data-sel]").forEach(c => { c.checked = e.target.checked; });
+    refreshBulk();
+  };
+  $("#bulk-clear").onclick = () => { archiveSelected.clear(); $$("[data-sel]").forEach(c => { c.checked = false; }); refreshBulk(); };
+  $("#bulk-del").onclick = () => {
+    const n = archiveSelected.size;
+    confirmDialog(`Eliminare definitivamente ${n} file selezionat${n === 1 ? "o" : "i"} dall'archivio?`, async () => {
+      try {
+        const res = await api("/archive/files/bulk-delete", { method: "POST", json: { ids: [...archiveSelected] } });
+        archiveSelected.clear();
+        toast(`${res.deleted} file eliminati`, "success"); render();
+      } catch (err) { toast(err.message, "error"); }
+    }, `Elimina ${n}`);
+  };
   $$("[data-fedit]").forEach(b => b.onclick = e => {
     e.stopPropagation();
     const folder = folders.find(x => x.id == b.dataset.fedit);
@@ -2243,8 +2279,11 @@ route(/^\/archivio$/, async () => {
       },
     });
   });
-  if ($("#del-folder")) $("#del-folder").onclick = () => confirmDialog(`Eliminare la cartella “${currentFolder.name}”?`, async () => {
-    try { await api("/archive/folders/" + archiveFolderId, { method: "DELETE" }); archiveFolderId = null; toast("Cartella eliminata", "success"); render(); }
+  if ($("#del-folder")) $("#del-folder").onclick = () => confirmDialog(
+    currentFolder.file_count
+      ? `Eliminare la cartella “${currentFolder.name}” insieme ai suoi ${currentFolder.file_count} file? L'operazione non si può annullare.`
+      : `Eliminare la cartella “${currentFolder.name}”?`, async () => {
+    try { await api(`/archive/folders/${archiveFolderId}?with_files=true`, { method: "DELETE" }); archiveFolderId = null; archiveSelected.clear(); toast("Cartella eliminata", "success"); render(); }
     catch (err) { toast(err.message, "error"); }
   });
   $("#add-folder").onclick = () => {
@@ -2276,7 +2315,7 @@ route(/^\/archivio$/, async () => {
     downloadFile(`/archive/files/${f.id}/download`, f.filename);
   });
   $$("[data-rm]").forEach(b => b.onclick = () => confirmDialog("Rimuovere questo file dall'archivio?", async () => {
-    try { await api("/archive/files/" + b.dataset.rm, { method: "DELETE" }); toast("File rimosso", "success"); render(); }
+    try { await api("/archive/files/" + b.dataset.rm, { method: "DELETE" }); archiveSelected.delete(parseInt(b.dataset.rm)); toast("File rimosso", "success"); render(); }
     catch (err) { toast(err.message, "error"); }
   }));
 });
@@ -3258,6 +3297,23 @@ route(/^\/impostazioni$/, async () => {
     });
   }
 });
+
+/* ============ Tema (chiaro / scuro / blu marine) ============ */
+
+const THEMES = { light: "Chiaro", dark: "Scuro", navy: "Blu marine" };
+function applyTheme(theme) {
+  if (!THEMES[theme]) theme = "light";
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem("cn_theme", theme); } catch { /* storage non disponibile */ }
+  const sel = $("#theme-select");
+  if (sel) sel.value = theme;
+}
+(function initThemeSelect() {
+  const sel = $("#theme-select");
+  sel.innerHTML = Object.entries(THEMES).map(([k, l]) => `<option value="${k}">${l}</option>`).join("");
+  sel.onchange = () => applyTheme(sel.value);
+  applyTheme(document.documentElement.dataset.theme || "light");
+})();
 
 /* ============ Avvio ============ */
 
