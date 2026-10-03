@@ -101,10 +101,14 @@ In sviluppo il database è in `data/shipyard.db` e gli allegati in `data/uploads
 
 ### Ricreare i pacchetti standalone
 
-- **macOS**: `./build_mac.sh` → produce `CantiereNavalePro.app` (serve una Mac arm64;
-  PyInstaller non cross-compila)
-- **Windows**: `./build_windows.sh` → produce `CantiereNavalePro-Windows/` con Python
-  embedded, avviabile su qualsiasi PC Windows 64 bit senza installazioni
+- **Su GitHub (consigliato)**: scheda *Actions* → *Build* → *Run workflow*. A build
+  finita i file (DMG e ZIP) sono scaricabili dalla pagina della run nella sezione
+  *Artifacts*. Su un **tag** `v…` (es. `v1.0.1`) vengono inoltre allegati a una
+  *Release* pronta da condividere.
+- **macOS in locale**: `./build_mac.sh` → produce `CantiereNavalePro.app` (serve una
+  Mac arm64; PyInstaller non cross-compila)
+- **Windows in locale**: `./build_windows.sh` → produce `CantiereNavalePro-Windows/`
+  con Python embedded, avviabile su qualsiasi PC Windows 64 bit senza installazioni
 
 ## Struttura del progetto
 
