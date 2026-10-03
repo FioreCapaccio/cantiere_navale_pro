@@ -118,6 +118,7 @@ jobs:
       - name: Compila setup con Inno Setup
         shell: bash
         run: |
+          export MSYS_NO_PATHCONV=1  # Git Bash non deve trasformare /DAPP_VERSION in un percorso
           ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
           if [ ! -x "$ISCC" ]; then
             choco install innosetup -y --no-progress
