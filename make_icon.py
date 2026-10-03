@@ -1,4 +1,5 @@
-"""Genera icon.icns (e icon.png) per l'app: barca stilizzata su fondo blu notte."""
+"""Genera icon.icns (mac), icon.ico (windows) e icon.png per l'app: barca stilizzata su fondo blu notte."""
+import sys
 from PIL import Image, ImageDraw
 
 S = 1024
@@ -47,16 +48,23 @@ d.polygon([(512, 250), (620, 285), (512, 320)], fill=AMBER)
 
 img.save("icon.png")
 
-# iconset → icns
-import os, subprocess, shutil
-os.makedirs("icon.iconset", exist_ok=True)
-for size in [16, 32, 64, 128, 256, 512, 1024]:
-    img.resize((size, size), Image.LANCZOS).save(f"icon.iconset/icon_{size}x{size}.png")
-    if size <= 512:
-        img.resize((size * 2, size * 2), Image.LANCZOS).save(f"icon.iconset/icon_{size}x{size}@2x.png")
-subprocess.run(
-    ["iconutil", "-c", "icns", "icon.iconset", "-o", "icon.icns"],
-    check=True,
+# ico per Windows (setup e PyInstaller win)
+img.save(
+    "icon.ico",
+    sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
 )
-shutil.rmtree("icon.iconset")
-print("icon.icns generata")
+
+# iconset → icns (solo macOS: iconutil non esiste altrove)
+import os, subprocess, shutil
+if sys.platform == "darwin":
+    os.makedirs("icon.iconset", exist_ok=True)
+    for size in [16, 32, 64, 128, 256, 512, 1024]:
+        img.resize((size, size), Image.LANCZOS).save(f"icon.iconset/icon_{size}x{size}.png")
+        if size <= 512:
+            img.resize((size * 2, size * 2), Image.LANCZOS).save(f"icon.iconset/icon_{size}x{size}@2x.png")
+    subprocess.run(
+        ["iconutil", "-c", "icns", "icon.iconset", "-o", "icon.icns"],
+        check=True,
+    )
+    shutil.rmtree("icon.iconset")
+print("icon.png / icon.ico" + (" / icon.icns generate" if sys.platform == "darwin" else " generate"))
