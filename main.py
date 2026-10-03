@@ -526,6 +526,30 @@ class TimeEntry(Base):
     worker_ref = relationship("Worker", back_populates="entries")
 
 
+class LookupOption(Base):
+    """Valori configurabili delle tendine (es. categorie lavoro, tipi cliente).
+    L'utente li gestisce da Impostazioni senza toccare il codice."""
+    __tablename__ = "lookup_options"
+    id = Column(Integer, primary_key=True, index=True)
+    category = Column(String, nullable=False, index=True)  # es. "categoria_lavoro"
+    value = Column(String, nullable=False)
+    sort_order = Column(Integer, default=0)
+
+    __table_args__ = (UniqueConstraint("category", "value", name="uq_lookup_cat_val"),)
+
+
+# Valori iniziali delle tendine: inseriti al primo avvio (tabella vuota),
+# poi modificabili liberamente da Impostazioni.
+DEFAULT_LOOKUPS = {
+    "tipo_cliente": ["Privato", "Azienda", "P.A."],
+    "categoria_lavoro": ["Manodopera", "Ricambi", "Materiali", "Noleggio", "Subappalto", "Altro"],
+    "tipo_imbarcazione": ["Vela", "Motore", "Gommone", "Multiscafo", "Deriva"],
+    "materiale_scafo": ["VTR", "Alluminio", "Acciaio", "Legno", "Cemento"],
+    "alimentazione": ["Diesel", "Benzina", "Elettrico", "Ibrido", "GPL"],
+    "ruolo_lavoratore": ["Meccanico", "Carpentiere", "Verniciatore", "Elettricista", "Velaio", "Manovale"],
+}
+
+
 class Document(Base):
     __tablename__ = "documents"
     id = Column(Integer, primary_key=True, index=True)
@@ -1198,6 +1222,18 @@ class WorkerOut(ORMModel):
     emergency_phone: str
 
 
+class LookupCreate(BaseModel):
+    category: str
+    value: str
+
+
+class LookupOut(ORMModel):
+    id: int
+    category: str
+    value: str
+    sort_order: int
+
+
 class PurchaseOrderLineCreate(BaseModel):
     item_id: Optional[int] = None
     description: str
@@ -1639,6 +1675,12 @@ def startup():
                 ("Varie", ""),
             ]:
                 db.add(ArchiveFolder(name=name, description=desc))
+
+        # tendine configurabili: seed solo alla prima apertura (tabella vuota)
+        if not db.query(LookupOption).first():
+            for cat, values in DEFAULT_LOOKUPS.items():
+                for i, v in enumerate(values):
+                    db.add(LookupOption(category=cat, value=v, sort_order=i))
 
         get_settings(db)
         db.commit()
@@ -3284,6 +3326,60 @@ def backup_database(db: Session = Depends(get_db), _: User = Depends(require_adm
 # =========================
 # SETTINGS
 # =========================
+
+@app.get("/lookups")
+def list_lookups(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    """Tendine configurabili: {categoria: [valori ordinati]}"""
+    rows = db.query(LookupOption).order_by(
+        LookupOption.category, LookupOption.sort_order, LookupOption.value
+    ).all()
+    grouped: dict = {}
+    for r in rows:
+        grouped.setdefault(r.category, []).append(r.value)
+    return grouped
+
+
+@app.get("/lookups/full", response_model=List[LookupOut])
+def list_lookups_full(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    """Elenco completo con id (serve alla pagina Impostazioni per eliminare le voci)."""
+    return db.query(LookupOption).order_by(
+        LookupOption.category, LookupOption.sort_order, LookupOption.value
+    ).all()
+
+
+@app.post("/lookups", response_model=LookupOut, status_code=201)
+def create_lookup(payload: LookupCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Solo gli amministratori possono modificare le liste")
+    cat = payload.category.strip()
+    val = payload.value.strip()
+    if not cat or not val:
+        raise HTTPException(status_code=400, detail="Categoria e valore sono obbligatori")
+    existing = db.query(LookupOption).filter(
+        LookupOption.category == cat, LookupOption.value == val
+    ).first()
+    if existing:
+        return existing  # già presente: nessun duplicato
+    max_order = db.query(SQLFunc.max(LookupOption.sort_order)).filter(
+        LookupOption.category == cat
+    ).scalar() or 0
+    opt = LookupOption(category=cat, value=val, sort_order=max_order + 1)
+    db.add(opt)
+    db.commit()
+    db.refresh(opt)
+    return opt
+
+
+@app.delete("/lookups/{option_id}", status_code=204)
+def delete_lookup(option_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Solo gli amministratori possono modificare le liste")
+    opt = db.get(LookupOption, option_id)
+    if not opt:
+        raise HTTPException(status_code=404, detail="Opzione non trovata")
+    db.delete(opt)
+    db.commit()
+
 
 @app.get("/settings", response_model=SettingsOut)
 def read_settings(db: Session = Depends(get_db), _: User = Depends(get_current_user)):

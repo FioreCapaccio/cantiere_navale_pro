@@ -166,6 +166,43 @@ async function loadWarehouses() { cache.warehouses = await api("/warehouses"); r
 async function loadItems() { cache.items = await api("/items"); return cache.items; }
 async function loadSettings() { cache.settings = await api("/settings"); return cache.settings; }
 
+/* ---- Tendine configurabili (Impostazioni → Liste personalizzate) ---- */
+
+let LOOKUPS = {};  // { categoria: [valori] }
+
+const LOOKUP_LABELS = {
+  tipo_cliente: "Tipologia cliente",
+  categoria_lavoro: "Categorie lavori",
+  tipo_imbarcazione: "Tipi imbarcazione",
+  materiale_scafo: "Materiali scafo",
+  alimentazione: "Alimentazioni",
+  ruolo_lavoratore: "Ruoli lavoratori",
+};
+const lookupLabel = cat => LOOKUP_LABELS[cat] || cat.replace(/_/g, " ");
+const lookupValues = cat => (LOOKUPS[cat] && LOOKUPS[cat].length ? LOOKUPS[cat] : []);
+
+async function loadLookups() {
+  try { LOOKUPS = await api("/lookups"); }
+  catch { LOOKUPS = {}; }
+  renderDatalists();
+}
+
+// crea/aggiorna i <datalist> globali usati dai campi tipo "combo"
+function renderDatalists() {
+  const box = $("#datalists");
+  if (!box) return;
+  box.innerHTML = Object.keys({ ...LOOKUP_LABELS, ...LOOKUPS }).map(cat =>
+    `<datalist id="dl-${cat}">${lookupValues(cat).map(v => `<option value="${esc(v)}">`).join("")}</datalist>`
+  ).join("");
+}
+
+async function loadLookupsFull() {  // per Impostazioni: serve anche l'id di ogni voce
+  const rows = await api("/lookups/full");
+  const grouped = {};
+  for (const r of rows) (grouped[r.category] = grouped[r.category] || []).push(r);
+  return grouped;
+}
+
 const clientName = id => (cache.clients.find(c => c.id === id) || {}).name || ("#" + id);
 const boatName = id => { const b = cache.boats.find(x => x.id === id); return b ? b.name : "—"; };
 
@@ -258,6 +295,11 @@ const field = (name, label, opts = {}) => {
     return `<label class="field ${full ? "full" : ""}">${label}${required ? ' <span class="req">*</span>' : ""}
       <select name="${name}"${idAttr} ${required ? "required" : ""} ${disabled ? "disabled" : ""}>${opts.options}</select></label>`;
   }
+  // combo: input libero con suggerimenti da una tendina configurabile
+  if (type === "combo") {
+    return `<label class="field ${full ? "full" : ""}">${label}${required ? ' <span class="req">*</span>' : ""}
+      <input name="${name}"${idAttr} type="text" list="dl-${opts.list || ""}" value="${val}" placeholder="${esc(placeholder || "")}" ${required ? "required" : ""} ${disabled ? "disabled" : ""}></label>`;
+  }
   return `<label class="field ${full ? "full" : ""}">${label}${required ? ' <span class="req">*</span>' : ""}
     <input name="${name}"${idAttr} type="${type}" value="${val}" placeholder="${esc(placeholder || "")}" ${min != null ? `min="${min}"` : ""} ${step != null ? `step="${step}"` : ""} ${required ? "required" : ""} ${disabled ? "disabled" : ""}></label>`;
 };
@@ -332,7 +374,7 @@ $("#login-form").addEventListener("submit", async e => {
     localStorage.setItem("cn_token", TOKEN);
     CURRENT_USER = await api("/auth/me");
     showApp();
-    await loadSettings();
+    await Promise.all([loadSettings(), loadLookups()]);
     location.hash = "#/dashboard";
     render();
   } catch (err) {
@@ -566,7 +608,7 @@ function clientModal(client = null, onSaved = null) {
       <div class="form-section">Dati principali</div>
       <div class="form-grid">
         ${field("name", "Nome / Ragione sociale", { required: true, value: c.name, full: true })}
-        ${field("client_type", "Tipologia", { type: "select", options: ["Privato", "Azienda", "P.A."].map(t => `<option ${c.client_type === t ? "selected" : ""}>${t}</option>`).join("") })}
+        ${field("client_type", "Tipologia", { type: "combo", list: "tipo_cliente", value: c.client_type || "Privato" })}
         ${field("referente", "Referente", { value: c.referente })}
       </div>
       <div class="form-section">Dati fiscali</div>
@@ -771,7 +813,7 @@ function boatModal(boat = null, presetClientId = null, onSaved = null) {
         ${field("client_id", "Proprietario", { type: "select", required: true, options: `<option value="">— scegli cliente —</option>` +
           cache.clients.map(c => `<option value="${c.id}" ${b.client_id === c.id || (!boat && presetClientId === c.id) ? "selected" : ""}>${esc(c.name)}</option>`).join("") })}
         ${field("name", "Nome imbarcazione", { required: true, value: b.name })}
-        ${field("boat_type", "Tipo", { value: b.boat_type, placeholder: "Vela, Motore, Gommone…" })}
+        ${field("boat_type", "Tipo", { type: "combo", list: "tipo_imbarcazione", value: b.boat_type, placeholder: "Vela, Motore, Gommone…" })}
         ${field("model", "Modello", { value: b.model })}
         ${field("builder", "Cantiere / Costruttore", { value: b.builder })}
         ${field("build_year", "Anno di costruzione", { type: "number", min: 1900, max: 2100, value: b.build_year ?? "" })}
@@ -786,8 +828,8 @@ function boatModal(boat = null, presetClientId = null, onSaved = null) {
         ${field("beam", "Baglio (m)", { type: "number", step: "any", min: 0, value: b.beam ?? "" })}
         ${field("draft", "Pescaggio (m)", { type: "number", step: "any", min: 0, value: b.draft ?? "" })}
         ${field("displacement", "Dislocamento (t)", { type: "number", step: "any", min: 0, value: b.displacement ?? "" })}
-        ${field("hull_material", "Materiale scafo", { value: b.hull_material, placeholder: "VTR, alluminio, acciaio…" })}
-        ${field("fuel_type", "Alimentazione", { value: b.fuel_type, placeholder: "Diesel, benzina…" })}
+        ${field("hull_material", "Materiale scafo", { type: "combo", list: "materiale_scafo", value: b.hull_material, placeholder: "VTR, alluminio, acciaio…" })}
+        ${field("fuel_type", "Alimentazione", { type: "combo", list: "alimentazione", value: b.fuel_type, placeholder: "Diesel, benzina…" })}
       </div>
       <div class="form-section">Motore</div>
       <div class="form-grid">
@@ -1313,12 +1355,15 @@ async function timeEntryModal(projectId, entry = null, jobs = []) {
 }
 
 function jobModal(projectId, job = null) {  const j = job || {};
+  const CATS = lookupValues("categoria_lavoro").length
+    ? lookupValues("categoria_lavoro")
+    : ["Manodopera", "Ricambi", "Materiali", "Noleggio", "Subappalto", "Altro"];
   modalForm({
     title: job ? "Modifica lavoro" : "Nuovo lavoro",
     body: `
       <div class="form-grid">
         ${field("description", "Descrizione", { required: true, value: j.description, full: true })}
-        ${field("category", "Categoria", { type: "select", id: "jb-cat", options: ["Manodopera", "Ricambi", "Materiali", "Noleggio", "Subappalto", "Altro"].map(c => `<option ${j.category === c ? "selected" : ""}>${c}</option>`).join("") })}
+        ${field("category", "Categoria", { type: "select", id: "jb-cat", options: CATS.map(c => `<option ${j.category === c ? "selected" : ""}>${esc(c)}</option>`).join("") })}
         ${field("status", "Stato", { type: "select", options: Object.keys(JOB_STATUS).map(s => `<option ${j.status === s ? "selected" : ""}>${s}</option>`).join("") })}
         ${field("priority", "Priorità", { type: "select", options: ["bassa", "normale", "alta", "urgente"].map(p => `<option ${j.priority === p || (!job && p === "normale") ? "selected" : ""}>${p}</option>`).join("") })}
         ${field("qty", "Quantità", { type: "number", step: "any", min: 0, value: j.qty ?? 1 })}
@@ -2908,7 +2953,7 @@ function workerModal(worker = null) {
       <div class="form-grid">
         ${field("name", "Nome e cognome", { required: true, value: w.name })}
         ${field("employee_code", "Matricola", { value: w.employee_code })}
-        ${field("role", "Ruolo", { value: w.role, placeholder: "es. Meccanico, Carpentiere, Verniciatore" })}
+        ${field("role", "Ruolo", { type: "combo", list: "ruolo_lavoratore", value: w.role, placeholder: "es. Meccanico, Carpentiere, Verniciatore" })}
         ${field("phone", "Telefono", { value: w.phone })}
         ${field("email", "Email", { type: "email", value: w.email })}
         ${field("birth_date", "Data di nascita", { type: "date", value: w.birth_date || "" })}
@@ -2967,6 +3012,30 @@ route(/^\/impostazioni$/, async () => {
   if (isAdmin) {
     try { users = await api("/users"); } catch { users = []; }
   }
+  let lookupRows = {};
+  if (isAdmin) {
+    try { lookupRows = await loadLookupsFull(); } catch { lookupRows = {}; }
+  }
+  const lookupSection = !isAdmin ? "" : `
+    <div class="card">
+      <h2>${icon("list", 15)} Liste personalizzate</h2>
+      <p style="color:var(--muted);font-size:12.5px;margin-top:-4px">Le voci compaiono come suggerimenti nelle form: tipologia cliente, categorie dei lavori, tipi di imbarcazione, materiali, alimentazioni e ruoli. Puoi aggiungere o togliere voci liberamente.</p>
+      ${Object.keys({ ...LOOKUP_LABELS, ...lookupRows }).map(cat => {
+        const opts = lookupRows[cat] || [];
+        return `<div style="border-top:1px solid var(--border);padding:11px 0;display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+          <div style="width:190px;font-weight:600;font-size:13px;padding-top:2px">${esc(lookupLabel(cat))}</div>
+          <div style="flex:1;display:flex;gap:6px;flex-wrap:wrap;align-items:center;min-width:200px">
+            ${opts.length ? opts.map(o => `<span class="badge badge-teal">${esc(o.value)}
+              <a href="#" data-ldel="${o.id}" data-lval="${esc(o.value)}" title="Elimina “${esc(o.value)}”" style="color:inherit;font-weight:700;margin-left:2px">×</a></span>`).join("") : `<span style="color:var(--muted);font-size:12.5px">nessuna voce</span>`}
+          </div>
+          <form class="inline-form" data-lcat="${cat}" style="display:flex;gap:8px;align-items:center">
+            <label class="field" style="margin-bottom:0"><input type="text" placeholder="Nuova voce…" required></label>
+            <button class="btn btn-sm" type="submit">${icon("plus", 12)} Aggiungi</button>
+          </form>
+        </div>`;
+      }).join("")}
+    </div>`;
+
   $("#view").innerHTML = `
     <div class="page-head">
       <div><h1>${icon("settings")} Impostazioni</h1><div class="sub">Dati azienda, account e backup</div></div>
@@ -2989,6 +3058,8 @@ route(/^\/impostazioni$/, async () => {
         ${isAdmin ? `<button class="btn btn-primary">${icon("check", 14)} Salva impostazioni</button>` : `<p style="color:var(--muted)">Solo un amministratore può modificare i dati azienda.</p>`}
       </form>
     </div>
+
+    ${lookupSection}
 
     ${isAdmin ? `
     <div class="card">
@@ -3030,8 +3101,30 @@ route(/^\/impostazioni$/, async () => {
       </form>
     </div>`;
 
-  $("#settings-form").onsubmit = async e => {
+  // Liste personalizzate: aggiunta e rimozione voci
+  $$("form[data-lcat]").forEach(f => f.onsubmit = async e => {
     e.preventDefault();
+    const input = f.querySelector("input");
+    try {
+      await api("/lookups", { method: "POST", json: { category: f.dataset.lcat, value: input.value.trim() } });
+      toast("Voce aggiunta", "success");
+      await loadLookups();
+      render();
+    } catch (err) { toast(err.message, "error"); }
+  });
+  $$("[data-ldel]").forEach(a => a.onclick = async e => {
+    e.preventDefault();
+    confirmDialog(`Eliminare la voce “${a.dataset.lval}” dalle tendine? I dati già salvati non vengono modificati.`, async () => {
+      try {
+        await api("/lookups/" + a.dataset.ldel, { method: "DELETE" });
+        toast("Voce eliminata", "success");
+        await loadLookups();
+        render();
+      } catch (err) { toast(err.message, "error"); }
+    });
+  });
+
+  $("#settings-form").onsubmit = async e => {    e.preventDefault();
     const payload = Object.fromEntries(new FormData(e.target).entries());
     try {
       await api("/settings", { method: "PUT", json: payload });
@@ -3113,7 +3206,7 @@ route(/^\/impostazioni$/, async () => {
   if (TOKEN) {
     try {
       CURRENT_USER = await api("/auth/me");
-      await loadSettings();
+      await Promise.all([loadSettings(), loadLookups()]);
       showApp();
     } catch {
       doLogout(false);
