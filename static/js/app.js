@@ -1493,12 +1493,23 @@ async function tabArticoli() {
       <p style="color:var(--muted);font-size:12.5px;margin-top:10px">Imposta la scorta minima nella scheda articolo: quando la giacenza totale scende sotto, l'articolo viene segnalato qui e in dashboard.</p>
     </div>`;
   $$("[data-edit]").forEach(b => b.onclick = () => itemModal(items.find(x => x.id == b.dataset.edit)));
-  $$("[data-del]").forEach(b => b.onclick = () => {
+  $$("[data-del]").forEach(b => b.onclick = async () => {
     const it = items.find(x => x.id == b.dataset.del);
-    confirmDialog(`Eliminare l'articolo “${it.name}”?`, async () => {
-      try { await api("/items/" + it.id, { method: "DELETE" }); toast("Articolo eliminato", "success"); render(); }
+    let use;
+    try { use = await api(`/items/${it.id}/usage`); } catch (err) { toast(err.message, "error"); return; }
+    const used = use.stock_qty || use.movements || use.order_lines;
+    const details = [
+      use.stock_qty ? `${fmtNum(use.stock_qty)} ${it.unit} in giacenza` : "",
+      use.movements ? `${use.movements} movimenti di magazzino${use.project_movements ? ` (${use.project_movements} su commesse: i costi delle commesse cambieranno)` : ""}` : "",
+      use.order_lines ? `${use.order_lines} righe d'ordine (restano, senza l'articolo)` : "",
+    ].filter(Boolean);
+    const message = used
+      ? `“${it.name}” è usato: ${details.join(", ")}.\nEliminandolo vengono cancellati anche giacenze e movimenti. Continuare?`
+      : `Eliminare l'articolo “${it.name}”?`;
+    confirmDialog(message, async () => {
+      try { await api(`/items/${it.id}?force=${used ? "true" : "false"}`, { method: "DELETE" }); toast("Articolo eliminato", "success"); render(); }
       catch (err) { toast(err.message, "error"); }
-    });
+    }, used ? "Elimina comunque" : "Elimina");
   });
 }
 

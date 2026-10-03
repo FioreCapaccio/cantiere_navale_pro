@@ -89,3 +89,31 @@ def test_elimina_anagrafiche_varie(api):
     assert api.delete(f"/suppliers/{sup['id']}").status_code == 204
     w = api.post("/workers", json={"name": "Mario"}).json()
     assert api.delete(f"/workers/{w['id']}").status_code == 204
+
+
+def test_articolo_con_giacenza_zero_e_senza_movimenti_si_elimina(api):
+    wh = api.get("/warehouses").json()[0]
+    item = api.post("/items", json={"name": "Solo riga a zero"}).json()
+    # una riga di giacenza a 0 (carico e scarico) non deve bloccare... ma lo storico sì
+    api.post("/movements", json={"warehouse_id": wh["id"], "item_id": item["id"], "type": "carico", "qty": 2})
+    api.post("/movements", json={"warehouse_id": wh["id"], "item_id": item["id"], "type": "scarico", "qty": 2})
+    use = api.get(f"/items/{item['id']}/usage").json()
+    assert use["stock_qty"] == 0 and use["movements"] == 2
+    r = api.delete(f"/items/{item['id']}")
+    assert r.status_code == 400 and "2 movimenti" in r.json()["detail"]
+    assert api.delete(f"/items/{item['id']}?force=true").status_code == 204
+    assert item["id"] not in [i["id"] for i in api.get("/items").json()]
+
+
+def test_articolo_con_giacenza_richiede_force(api):
+    wh = api.get("/warehouses").json()[0]
+    item = api.post("/items", json={"name": "In giacenza", "unit": "kg"}).json()
+    api.post("/movements", json={"warehouse_id": wh["id"], "item_id": item["id"], "type": "carico", "qty": 5})
+    r = api.delete(f"/items/{item['id']}")
+    assert r.status_code == 400 and "giacenza" in r.json()["detail"]
+    sup = api.post("/suppliers", json={"name": "F"}).json()
+    po = api.post("/purchase-orders", json={"supplier_id": sup["id"], "lines": [
+        {"item_id": item["id"], "description": "riga", "qty": 1, "unit_cost": 1}]}).json()
+    assert api.delete(f"/items/{item['id']}?force=true").status_code == 204
+    line = api.get(f"/purchase-orders/{po['id']}").json()["lines"][0]
+    assert line["item_id"] is None and line["description"] == "riga"

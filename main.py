@@ -1755,7 +1755,7 @@ def sanitize_filename(name: str) -> str:
 
 from sqlalchemy import text as SQLText
 
-app = FastAPI(title="Cantiere Navale Pro", version="2.4")
+app = FastAPI(title="Cantiere Navale Pro", version="2.5")
 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -2452,17 +2452,49 @@ def update_item(item_id: int, payload: ItemUpdate, db: Session = Depends(get_db)
     return item
 
 
+def _item_usage(db: Session, item_id: int) -> dict:
+    stock_qty = db.query(SQLFunc.sum(Stock.qty)).filter(Stock.item_id == item_id).scalar() or 0
+    movements = db.query(Movement).filter(Movement.item_id == item_id)
+    return {
+        "stock_qty": round(stock_qty, 4),
+        "movements": movements.count(),
+        "project_movements": movements.filter(Movement.project_id.isnot(None)).count(),
+        "order_lines": db.query(PurchaseOrderLine).filter(PurchaseOrderLine.item_id == item_id).count(),
+    }
+
+
+@app.get("/items/{item_id}/usage")
+def item_usage(item_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    """Dove è usato un articolo: serve a spiegare perché non si può eliminare."""
+    if not db.get(Item, item_id):
+        raise HTTPException(status_code=404, detail="Articolo non trovato")
+    return _item_usage(db, item_id)
+
+
 @app.delete("/items/{item_id}", status_code=204)
-def delete_item(item_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
+def delete_item(item_id: int, force: bool = False, db: Session = Depends(get_db), _: User = Depends(require_manager)):
+    """Senza `force` si elimina solo un articolo mai movimentato (le giacenze a zero
+    non contano). Con `force` si cancellano anche giacenze e movimenti; le righe
+    d'ordine restano, senza il collegamento all'articolo."""
     item = db.get(Item, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Articolo non trovato")
 
-    has_movements = db.query(Movement).filter(Movement.item_id == item_id).count()
-    has_po_lines = db.query(PurchaseOrderLine).filter(PurchaseOrderLine.item_id == item_id).count()
-    if has_movements or db.query(Stock).filter(Stock.item_id == item_id).count() or has_po_lines:
-        raise HTTPException(status_code=400, detail="L'articolo ha movimenti, giacenze o ordini: non eliminabile")
+    use = _item_usage(db, item_id)
+    if not force:
+        if use["stock_qty"]:
+            raise HTTPException(status_code=400, detail=f"L'articolo ha ancora {use['stock_qty']:g} {item.unit} in giacenza")
+        if use["movements"] or use["order_lines"]:
+            parts = []
+            if use["movements"]:
+                parts.append(f"{use['movements']} movimenti di magazzino")
+            if use["order_lines"]:
+                parts.append(f"{use['order_lines']} righe d'ordine")
+            raise HTTPException(status_code=400, detail="L'articolo compare in " + " e ".join(parts))
 
+    db.query(Movement).filter(Movement.item_id == item_id).delete()
+    db.query(Stock).filter(Stock.item_id == item_id).delete()
+    db.query(PurchaseOrderLine).filter(PurchaseOrderLine.item_id == item_id).update({PurchaseOrderLine.item_id: None})
     db.delete(item)
     db.commit()
     return Response(status_code=204)
