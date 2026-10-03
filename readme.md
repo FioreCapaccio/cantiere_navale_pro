@@ -102,9 +102,11 @@ In sviluppo il database è in `data/shipyard.db` e gli allegati in `data/uploads
 ### Ricreare i pacchetti standalone
 
 - **Su GitHub (consigliato)**: scheda *Actions* → *Build* → *Run workflow*. A build
-  finita i file (DMG e ZIP) sono scaricabili dalla pagina della run nella sezione
-  *Artifacts*. Su un **tag** `v…` (es. `v1.0.1`) vengono inoltre allegati a una
-  *Release* pronta da condividere.
+  finita i file sono scaricabili dalla pagina della run nella sezione *Artifacts*:
+  DMG macOS, ZIP Windows portabile e **CantiereNavalePro-Setup.exe** (installazione
+  classica con Avanti/Avanti/Fine, collegamenti e disinstallazione). Su un **tag**
+  `v…` (es. `v2.1`) i tre file vengono inoltre allegati a una *Release* pronta da
+  condividere; la versione del setup la prende dal numero del tag.
 - **macOS in locale**: `./build_mac.sh` → produce `CantiereNavalePro.app` (serve una
   Mac arm64; PyInstaller non cross-compila)
 - **Windows in locale**: `./build_windows.sh` → produce `CantiereNavalePro-Windows/`
