@@ -62,6 +62,34 @@ Il pacchetto include Python: sul PC Windows **non serve installare nulla**.
 - **API REST** complete su `http://127.0.0.1:8765/docs` (Swagger UI)
 - **Migrazione automatica del database**: aggiornando l'app, i dati esistenti vengono estesi senza perdite
 
+## Novità della versione 2.2
+
+- **Calcoli a prova di centesimo**: tutti gli importi usano l'aritmetica decimale con arrotondamento
+  commerciale riga per riga (stesse regole della fattura elettronica); sconto in % (preso dalla scheda
+  cliente) e in euro, mai superiore al subtotale; pagamenti che non possono superare il residuo.
+- **Numerazione sicura**: i progressivi (fatture, DDT, commesse, ordini) ripartono dal massimo esistente,
+  quindi eliminare un documento non crea più duplicati.
+- **Fattura elettronica completa**: riepilogo IVA, dati di pagamento, natura IVA per le operazioni
+  a aliquota 0 (es. N3.4 per la nautica), codice destinatario SdI/PEC, controllo della partita IVA.
+- **Redditività della commessa** calcolata dal server: ricavi, costi (ore registrate, materiali scaricati,
+  subappalti), margine, importo ancora da fatturare.
+- **Magazzino**: costo medio ponderato aggiornato a ogni carico e alla ricezione degli ordini d'acquisto.
+- **Meno passaggi**: dalla commessa, un clic crea Proforma / Fattura / DDT (con IVA, sconto cliente e
+  scadenza già impostati); il registro IVA mostra il riepilogo per aliquota.
+- **Sicurezza e affidabilità**: blocco dopo 5 password errate, password minime di 8 caratteri,
+  eliminazioni riservate a manager e amministratori, backup automatico giornaliero (ultimi 14) in
+  `backups/`, limite di 100 MB sui file caricati, allegati ritrovati anche se sposti la cartella dati.
+
+## Test
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests
+```
+
+I test usano un database temporaneo e coprono totali, arrotondamenti, pagamenti, numerazione, XML,
+magazzino, redditività commessa, registro IVA e permessi.
+
 ## Accesso da altri dispositivi (opzionale)
 
 Di default il server risponde solo sul computer locale. Per usarlo anche da
@@ -116,6 +144,7 @@ In sviluppo il database è in `data/shipyard.db` e gli allegati in `data/uploads
 
 ```
 main.py                 Server FastAPI + API + modello dati
+tests/                  Test automatici (pytest)
 static/                 Interfaccia web (HTML/CSS/JS, nessuna dipendenza)
 data/                   Database SQLite e allegati (creata al primo avvio)
 legacy/                 Precedente versione Flask (non più mantenuta)

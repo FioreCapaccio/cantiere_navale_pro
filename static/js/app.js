@@ -110,7 +110,12 @@ async function api(path, options = {}) {
 async function downloadFile(url, fallbackName) {
   const headers = TOKEN ? { "Authorization": "Bearer " + TOKEN } : {};
   const res = await fetch(url, { headers });
-  if (!res.ok) { toast("Download non riuscito", "error"); return; }
+  if (!res.ok) {
+    let msg = "Download non riuscito";
+    try { const j = await res.json(); if (typeof j.detail === "string") msg = j.detail; } catch { /* nessun dettaglio */ }
+    toast(msg, "error");
+    return;
+  }
   const blob = await res.blob();
   const cd = res.headers.get("content-disposition") || "";
   const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="?([^";]+)"?/);
@@ -152,10 +157,20 @@ const badge = (map, key) => {
   const [label, cls] = map[key] || [key || "—", "badge-gray"];
   return `<span class="badge ${cls}">${esc(label)}</span>`;
 };
-const docTot = d => {
-  const sub = (d.lines || []).reduce((a, l) => a + l.qty * l.price, 0);
-  return Math.max(0, sub - (d.discount || 0)) * (1 + (d.tax_rate || 0) / 100);
+/* I totali li calcola sempre il server (arrotondamenti al centesimo): qui si leggono soltanto */
+const docTot = d => d.total || 0;
+const lineTotal = l => Math.round((l.qty || 0) * (l.price || 0) * 100) / 100;
+const VAT_NATURES = {
+  "N3.4": "N3.4 — Non imponibile, operazioni assimilate all'esportazione (art. 8-bis)",
+  "N3.1": "N3.1 — Non imponibile, esportazioni",
+  "N3.2": "N3.2 — Non imponibile, cessioni intracomunitarie",
+  "N4": "N4 — Esente",
+  "N2.2": "N2.2 — Non soggetta, altri casi",
+  "N6.9": "N6.9 — Inversione contabile",
+  "N1": "N1 — Esclusa ex art. 15",
 };
+const vatNatureOptions = sel => `<option value="">— scegli —</option>` +
+  Object.entries(VAT_NATURES).map(([k, l]) => `<option value="${k}" ${sel === k ? "selected" : ""}>${esc(l)}</option>`).join("");
 
 /* ============ Cache ============ */
 
@@ -429,6 +444,9 @@ route(/^\/dashboard$/, async () => {
       </div>
     </div>
 
+    ${CURRENT_USER.default_password ? `<div class="alert-banner bad">${icon("alert", 16)} Stai usando la password predefinita: cambiala subito. <a href="#/impostazioni" style="margin-left:auto;color:inherit">Vai a Impostazioni →</a></div>` : ""}
+    ${(cache.settings && (!cache.settings.company_vat || cache.settings.company_vat === "00000000000" || !cache.settings.company_address)) ? `<div class="alert-banner">${icon("alert", 16)} Completa i dati azienda (P.IVA, indirizzo): servono su documenti e fattura elettronica. <a href="#/impostazioni" style="margin-left:auto;color:inherit">Completa →</a></div>` : ""}
+    ${d.payables_overdue_count ? `<div class="alert-banner bad">${icon("alert", 16)} ${d.payables_overdue_count} fattur${d.payables_overdue_count === 1 ? "a fornitore scaduta" : "e fornitori scadute"} da pagare — totale ${fmtEur(d.payables_overdue_total)} <a href="#/acquisti" style="margin-left:auto;color:inherit">Apri acquisti →</a></div>` : ""}
     ${d.overdue_count ? `<div class="alert-banner bad">${icon("alert", 16)} ${d.overdue_count} fattur${d.overdue_count === 1 ? "a" : "e"} scadut${d.overdue_count === 1 ? "a" : "e"} non saldat${d.overdue_count === 1 ? "a" : "e"} — totale ${fmtEur(d.overdue_total)} <a href="#/scadenzario" style="margin-left:auto;color:inherit">Apri lo scadenzario →</a></div>` : ""}
 
     <div class="stats-grid">
@@ -436,7 +454,8 @@ route(/^\/dashboard$/, async () => {
       <div class="stat"><div class="label">Imbarcazioni</div><div class="value">${fmtNum(d.boats)}</div></div>
       <div class="stat"><div class="label">Commesse aperte</div><div class="value">${fmtNum(d.open_projects)}</div><div class="hint">su ${fmtNum(d.total_projects)} totali</div></div>
       <div class="stat bad"><div class="label">Da incassare</div><div class="value money">${fmtEur(d.to_collect)}</div><div class="hint">fatture non saldate</div></div>
-      <div class="stat good"><div class="label">Fatturato</div><div class="value money">${fmtEur(d.invoiced)}</div></div>
+      <div class="stat good"><div class="label">Fatturato ${new Date().getFullYear()}</div><div class="value money">${fmtEur(d.invoiced_year)}</div><div class="hint">totale storico ${fmtEur(d.invoiced)}</div></div>
+      <div class="stat warn"><div class="label">Da pagare fornitori</div><div class="value money">${fmtEur(d.to_pay)}</div><div class="hint">fatture di acquisto aperte</div></div>
       <div class="stat good"><div class="label">Incassato</div><div class="value money">${fmtEur(d.collected)}</div></div>
       <div class="stat"><div class="label">Valore magazzino</div><div class="value money">${fmtEur(d.inventory_value)}</div><div class="hint">a costo</div></div>
     </div>
@@ -617,6 +636,7 @@ function clientModal(client = null, onSaved = null) {
         ${field("tax_code", "Codice fiscale", { value: c.tax_code })}
         ${field("email", "Email", { type: "email", value: c.email })}
         ${field("pec", "PEC", { type: "email", value: c.pec })}
+        ${field("sdi_code", "Codice destinatario SdI", { value: c.sdi_code, placeholder: "7 caratteri (fatt. elettronica)" })}
       </div>
       <div class="form-section">Contatti</div>
       <div class="form-grid">
@@ -637,7 +657,7 @@ function clientModal(client = null, onSaved = null) {
       <div class="form-section">Amministrazione</div>
       <div class="form-grid">
         ${field("iban", "IBAN", { value: c.iban, full: true })}
-        ${field("payment_terms", "Condizioni di pagamento", { value: c.payment_terms, placeholder: "es. 30 gg data fattura, Rabba…" })}
+        ${field("payment_terms", "Condizioni di pagamento", { value: c.payment_terms, placeholder: "es. 30 gg data fattura (il numero imposta la scadenza)" })}
         ${field("discount", "Sconto abituale %", { type: "number", step: "any", min: 0, value: c.discount ?? 0 })}
         ${field("active", "Stato", { type: "select", options: `<option value="true" ${c.active !== false ? "selected" : ""}>Attivo</option><option value="false" ${c.active === false ? "selected" : ""}>Disattivo</option>` })}
         ${field("notes", "Note", { type: "textarea", value: c.notes, full: true })}
@@ -1059,13 +1079,11 @@ route(/^\/commesse\/(\d+)$/, async (id) => {
   const jobs = await api(`/projects/${id}/jobs`);
   const projMovs = await api(`/projects/${id}/movements`);
   const timesheets = await api(`/projects/${id}/timesheets`);
-  const materialCost = projMovs.filter(x => x.type === "scarico").reduce((a, x) => a + (x.qty || 0) * (x.unit_cost || 0), 0);
+  const sum = await api(`/projects/${id}/summary`);
   const [allDocs] = await Promise.all([api("/documents"), loadClients()]);
   const linkedDocs = allDocs.filter(d => d.project_id === project.id);
   await loadBoats();
 
-  const jobsTotal = jobs.reduce((a, j) => a + (j.qty || 0) * (j.unit_price || 0), 0);
-  const jobsCost = jobs.reduce((a, j) => a + (j.qty || 0) * (j.unit_cost || 0), 0);
 
   $("#view").innerHTML = `
     <a class="back-link" href="#/commesse">${icon("arrowleft", 14)} Tutte le commesse</a>
@@ -1086,20 +1104,21 @@ route(/^\/commesse\/(\d+)$/, async (id) => {
           ${Object.entries(PROJECT_STATUS).map(([k, [l]]) => `<option value="${k}" ${project.status === k ? "selected" : ""}>${l}</option>`).join("")}
         </select>
         <button class="btn" id="p-edit">${icon("edit", 14)} Modifica</button>
-        <button class="btn" id="p-mkdoc">${icon("file", 14)} Crea documento</button>
+        <button class="btn" id="p-mkdoc-Proforma">${icon("file", 14)} Proforma</button>
+        <button class="btn btn-primary" id="p-mkdoc-Fattura">${icon("file", 14)} Fattura</button>
+        <button class="btn" id="p-mkdoc-DDT">${icon("file", 14)} DDT</button>
         <button class="btn btn-danger" id="p-del">${icon("trash", 14)}</button>
       </div>
     </div>
 
     <div class="stats-grid">
-      <div class="stat"><div class="label">Lavori</div><div class="value">${fmtNum(jobs.length)}</div></div>
-      <div class="stat good"><div class="label">Valore lavori</div><div class="value money">${fmtEur(jobsTotal)}</div><div class="hint">a prezzo</div></div>
-      <div class="stat warn"><div class="label">Costo lavori</div><div class="value money">${fmtEur(jobsCost)}</div></div>
-      <div class="stat warn"><div class="label">Materiali scaricati</div><div class="value money">${fmtEur(materialCost)}</div><div class="hint">${projMovs.filter(x => x.type === "scarico").length} moviment${projMovs.filter(x => x.type === "scarico").length === 1 ? "o" : "i"}</div></div>
-      <div class="stat warn"><div class="label">Manodopera effettiva</div><div class="value money">${fmtEur(timesheets.total_labor_cost)}</div><div class="hint">${fmtNum(timesheets.total_hours)} h da timesheet</div></div>
-      <div class="stat ${jobsTotal - (timesheets.total_labor_cost || jobsCost) - materialCost >= 0 ? "good" : "bad"}"><div class="label">Margine</div><div class="value money">${fmtEur(jobsTotal - (timesheets.total_labor_cost || jobsCost) - materialCost)}</div><div class="hint">${timesheets.total_labor_cost > 0 ? "manodopera effettiva + materiali" : "preventivo + materiali"}</div></div>
-      <div class="stat"><div class="label">Ore registrate</div><div class="value">${fmtNum(timesheets.total_hours)}</div><div class="hint">preventivate ${fmtNum(timesheets.budget_hours)}</div></div>
+      <div class="stat good"><div class="label">Valore lavori</div><div class="value money">${fmtEur(sum.revenue)}</div><div class="hint">${fmtNum(sum.jobs)} lavori a prezzo</div></div>
+      <div class="stat warn"><div class="label">Costi</div><div class="value money">${fmtEur(sum.total_cost)}</div><div class="hint">preventivo ${fmtEur(sum.estimated_cost)}</div></div>
+      <div class="stat ${sum.margin >= 0 ? "good" : "bad"}"><div class="label">Margine</div><div class="value money">${fmtEur(sum.margin)}</div><div class="hint">${sum.margin_pct != null ? fmtNum(sum.margin_pct) + "% del valore" : "&nbsp;"}</div></div>
+      <div class="stat"><div class="label">Ore</div><div class="value">${fmtNum(sum.hours)}</div><div class="hint">preventivate ${fmtNum(sum.budget_hours)}</div></div>
+      <div class="stat"><div class="label">Da fatturare</div><div class="value money">${fmtEur(sum.to_invoice)}</div><div class="hint">già fatturato ${fmtEur(sum.invoiced)}</div></div>
     </div>
+    <p style="color:var(--muted);font-size:12.5px;margin:-6px 0 14px">Costi: manodopera ${fmtEur(sum.labor_cost)} (${sum.labor_source}) · materiali ${fmtEur(sum.material_cost)} (${sum.material_source})${sum.other_cost ? " · altri costi " + fmtEur(sum.other_cost) : ""}. Dove esiste il consuntivo si usa quello, altrimenti il preventivo dei lavori.</p>
 
     <div class="card">
       <h2>${icon("clipboard", 15)} Lavori <span class="count">${jobs.length}</span></h2>
@@ -1215,28 +1234,13 @@ route(/^\/commesse\/(\d+)$/, async (id) => {
     try { await api("/projects/" + id, { method: "DELETE" }); toast("Commessa eliminata", "success"); location.hash = "#/commesse"; }
     catch (err) { toast(err.message, "error"); }
   });
-  $("#p-mkdoc").onclick = () => {
-    openModal(`
-      <h2>Crea documento da commessa</h2>
-      <p style="margin-bottom:14px">Le righe del documento saranno i lavori della commessa (prezzo = prezzo del lavoro).</p>
-      <div class="inline-form">
-        <label class="field">Tipo
-          <select id="mk-kind">
-            <option value="Proforma">Proforma</option>
-            <option value="Fattura">Fattura</option>
-            <option value="DDT">DDT</option>
-          </select></label>
-        <button class="btn btn-primary" id="mk-go">Crea</button>
-      </div>`);
-    $("#mk-go").onclick = async () => {
-      const kind = $("#mk-kind").value;
-      try {
-        const doc = await api(`/projects/${id}/create-document?kind=${kind}`, { method: "POST" });
-        closeModal(); toast("Documento creato", "success");
-        location.hash = "#/documenti/" + doc.id;
-      } catch (err) { toast(err.message, "error"); }
-    };
-  };
+  ["Proforma", "Fattura", "DDT"].forEach(kind => $("#p-mkdoc-" + kind).onclick = async () => {
+    try {
+      const doc = await api(`/projects/${id}/create-document?kind=${kind}`, { method: "POST" });
+      toast(`${kind} ${doc.number} creato dai lavori della commessa`, "success");
+      location.hash = "#/documenti/" + doc.id;
+    } catch (err) { toast(err.message, "error"); }
+  });
   $("#add-job").onclick = () => jobModal(id);
   $("#add-projmov").onclick = () => movementModal(null, project.id, "scarico");
   $("#add-projmov-generic").onclick = () => movementModal(null, project.id);
@@ -1598,7 +1602,7 @@ async function movementModal(movement = null, presetProjectId = null, presetType
       payload.warehouse_id = parseInt(payload.warehouse_id);
       payload.item_id = parseInt(payload.item_id);
       payload.qty = num(payload.qty);
-      payload.unit_cost = num(payload.unit_cost);
+      payload.unit_cost = payload.unit_cost === "" ? null : num(payload.unit_cost);
       payload.project_id = payload.project_id ? parseInt(payload.project_id) : null;
       if (movement) await api("/movements/" + movement.id, { method: "PUT", json: payload });
       else await api("/movements", { method: "POST", json: payload });
@@ -1716,8 +1720,10 @@ function documentModal(presetProjectId = null, presetClientId = null) {
         ${field("project_id", "Commessa", { type: "select", id: "nd-project", options: `<option value="">— nessuna —</option>` })}
         ${field("date", "Data", { type: "date", value: todayISO() })}
         ${field("due_date", "Scadenza", { type: "date" })}
-        ${field("discount", "Sconto (€)", { type: "number", step: "any", min: 0, value: 0, id: "nd-discount" })}
-        ${field("tax_rate", "IVA %", { type: "number", step: "any", min: 0, value: 22 })}
+        ${field("discount_pct", "Sconto %", { type: "number", step: "any", min: 0, id: "nd-discount-pct", placeholder: "da scheda cliente" })}
+        ${field("discount", "Sconto aggiuntivo (€)", { type: "number", step: "any", min: 0, value: 0 })}
+        ${field("tax_rate", "IVA %", { type: "number", step: "any", min: 0, id: "nd-tax", value: cache.settings?.default_tax_rate ?? 22 })}
+        ${field("vat_nature", "Natura IVA (se 0%)", { type: "select", id: "nd-nature", options: vatNatureOptions("") })}
       </div>
       <div class="form-section">Note</div>
       ${field("notes", "Note a piè di documento", { type: "textarea", full: true })}
@@ -1740,7 +1746,9 @@ function documentModal(presetProjectId = null, presetClientId = null) {
         date: fd.get("date") || null,
         due_date: fd.get("due_date") || null,
         discount: num(fd.get("discount")),
-        tax_rate: num(fd.get("tax_rate")),
+        discount_pct: fd.get("discount_pct") === "" ? null : num(fd.get("discount_pct")),
+        tax_rate: fd.get("tax_rate") === "" ? null : num(fd.get("tax_rate")),
+        vat_nature: fd.get("vat_nature") || "",
         notes: fd.get("notes") || "",
       };
       if (payload.kind === "DDT") {
@@ -1764,11 +1772,13 @@ function documentModal(presetProjectId = null, presetClientId = null) {
   kindSel.onchange = () => $("#nd-ddt").classList.toggle("hidden", kindSel.value !== "DDT");
   $("#nd-client").onchange = e => {
     const c = cache.clients.find(x => x.id === parseInt(e.target.value));
-    if (c && c.discount) {
-      $("#nd-discount").value = c.discount;
-      toast(`Applicato lo sconto abituale del ${c.discount}% di ${c.name}`);
-    }
+    $("#nd-discount-pct").value = c && c.discount ? c.discount : "";
+    $("#nd-discount-pct").placeholder = c && c.discount ? "" : "nessuno";
   };
+  const syncNature = () => $("#nd-nature").closest("label").classList.toggle("hidden", num($("#nd-tax").value) !== 0);
+  $("#nd-tax").oninput = syncNature;
+  syncNature();
+  if (presetClientId) $("#nd-client").onchange({ target: $("#nd-client") });
 }
 
 /* Formattazione righe documento: la manodopera è in ore (prezzo = €/ora) */
@@ -1808,10 +1818,13 @@ route(/^\/documenti\/(\d+)$/, async (id) => {
       </div>
       <div class="head-actions">
         ${doc.status !== "annullata" && doc.status !== "archiviata" ? `<button class="btn" id="d-edit">${icon("edit", 14)} Modifica</button>` : ""}
-        ${doc.status === "bozza" ? `<button class="btn" id="d-issue">${icon("check", 14)} Emetti</button>` : ""}
+        ${doc.status === "bozza" ? `<button class="btn btn-primary" id="d-issue">${icon("check", 14)} Emetti</button>` : ""}
+        ${doc.status === "emessa" && !(doc.payments || []).length ? `<button class="btn" id="d-cancel">Annulla documento</button>` : ""}
         ${["DDT", "Proforma"].includes(doc.kind) ? `<button class="btn" id="d-convert">${icon("file", 14)} Converti in fattura</button>` : ""}
         ${doc.kind === "Fattura" ? `<button class="btn" id="d-xml">${icon("download", 14)} XML</button>` : ""}
-        ${doc.status !== "archiviata" ? `<button class="btn" id="d-archive">${icon("archive", 14)} Archivia</button>` : `<button class="btn" id="d-unarchive">Riattiva</button>`}
+        ${["emessa", "pagata"].includes(doc.status) ? `<button class="btn" id="d-archive">${icon("archive", 14)} Archivia</button>` : ""}
+        ${doc.status === "archiviata" ? `<button class="btn" id="d-unarchive">Riattiva</button>` : ""}
+        ${doc.status === "annullata" ? `<button class="btn" id="d-unarchive">Ripristina come bozza</button>` : ""}
         <button class="btn" id="d-print">${icon("printer", 14)} Stampa</button>
         ${doc.status === "bozza" ? `<button class="btn btn-danger" id="d-del">${icon("trash", 14)}</button>` : ""}
       </div>
@@ -1827,7 +1840,7 @@ route(/^\/documenti\/(\d+)$/, async (id) => {
               <td>${esc(l.description)}</td>
               <td class="num">${lineQty(l)}</td>
               <td class="num">${linePrice(l)}</td>
-              <td class="num"><b>${fmtEur(l.qty * l.price)}</b></td>
+              <td class="num"><b>${fmtEur(lineTotal(l))}</b></td>
               <td class="num">${["bozza", "emessa"].includes(doc.status) ? `
                 <div class="actions">
                   <button class="btn btn-sm" data-ledit="${l.id}">${icon("edit", 13)}</button>
@@ -1849,14 +1862,18 @@ route(/^\/documenti\/(\d+)$/, async (id) => {
     <div class="grid-2">
       <div class="card">
         <h2>${icon("wallet", 15)} Pagamenti</h2>
+        ${doc.kind === "DDT" ? `<p style="color:var(--muted)">Un DDT non ha pagamenti: convertilo in fattura per incassare.</p>` : `
         <table class="tbl"><tbody>
           ${doc.payments?.length ? doc.payments.map(p => `
-            <tr><td>${fmtDate(p.date)}</td><td>${esc(p.method)}</td><td class="num"><b>${fmtEur(p.amount)}</b></td></tr>`).join("")
-            : `<tr class="empty-row"><td>Nessun pagamento registrato</td></tr>`}
+            <tr><td>${fmtDate(p.date)}</td><td>${esc(p.method)}</td><td class="num"><b>${fmtEur(p.amount)}</b></td>
+            <td class="num">${["admin", "manager"].includes(CURRENT_USER.role) && doc.status !== "archiviata" ? `<button class="btn btn-sm btn-danger" data-pdel="${p.id}" title="Elimina pagamento">${icon("trash", 12)}</button>` : ""}</td></tr>`).join("")
+            : `<tr class="empty-row"><td colspan="4">Nessun pagamento registrato</td></tr>`}
         </tbody></table>
-        ${doc.status !== "annullata" && doc.status !== "archiviata" ? `
+        ${doc.status === "bozza" ? `<p style="margin-top:12px;color:var(--muted)">Emetti il documento per poter registrare gli incassi.</p>` : ""}
+        ${!["bozza", "annullata", "archiviata"].includes(doc.status) && doc.residual > 0 ? `
         <form class="inline-form" id="pay-form" style="margin-top:14px">
-          <label class="field">Importo (€)<input name="amount" type="number" step="any" min="0.01" required value="${Math.max(0, doc.total - (doc.payments || []).reduce((a, p) => a + p.amount, 0)).toFixed(2)}"></label>
+          <label class="field">Importo (€)<input name="amount" type="number" step="0.01" min="0.01" max="${doc.residual}" required value="${doc.residual.toFixed(2)}"></label>
+          <label class="field">Data<input name="date" type="date" value="${todayISO()}"></label>
           <label class="field">Metodo
             <select name="method">
               <option value="bonifico">Bonifico</option>
@@ -1866,15 +1883,15 @@ route(/^\/documenti\/(\d+)$/, async (id) => {
               ${client?.payment_terms ? `<option value="${esc(client.payment_terms)}">${esc(client.payment_terms)}</option>` : ""}
             </select></label>
           <button class="btn btn-primary">Registra</button>
-        </form>
-        <p style="margin-top:10px;color:var(--muted);font-size:13px">Totale documento: <b>${fmtEur(doc.total)}</b> — al saldo lo stato passa a “Pagata”.</p>` : ""}
+        </form>` : ""}
+        <p style="margin-top:10px;color:var(--muted);font-size:13px">Totale <b>${fmtEur(doc.total)}</b> · incassato <b>${fmtEur(doc.paid)}</b> · residuo <b>${fmtEur(doc.residual)}</b>${doc.status !== "pagata" ? " — al saldo lo stato passa a “Pagata”" : ""}.</p>`}
       </div>
       <div class="card totals-box">
         <h2>${icon("euro", 15)} Totali</h2>
         <div class="row"><span>Subtotale</span><span>${fmtEur(doc.subtotal)}</span></div>
-        ${doc.discount ? `<div class="row"><span>Sconto</span><span>- ${fmtEur(doc.discount)}</span></div>` : ""}
+        ${doc.discount_amount ? `<div class="row"><span>Sconto${doc.discount_pct ? " " + fmtNum(doc.discount_pct) + "%" : ""}</span><span>- ${fmtEur(doc.discount_amount)}</span></div>` : ""}
         <div class="row"><span>Imponibile</span><span>${fmtEur(doc.taxable)}</span></div>
-        <div class="row"><span>IVA ${fmtNum(doc.tax_rate)}%</span><span>${fmtEur(doc.tax)}</span></div>
+        <div class="row"><span>IVA ${fmtNum(doc.tax_rate)}%${doc.vat_nature ? " (" + esc(doc.vat_nature) + ")" : ""}</span><span>${fmtEur(doc.tax)}</span></div>
         <div class="row grand"><span>Totale</span><span>${fmtEur(doc.total)}</span></div>
       </div>
     </div>`;
@@ -1927,11 +1944,19 @@ route(/^\/documenti\/(\d+)$/, async (id) => {
     try {
       await api(`/documents/${id}/payments`, {
         method: "POST",
-        json: { amount: num(fd.get("amount")), method: fd.get("method") },
+        json: { amount: num(fd.get("amount")), method: fd.get("method"), date: fd.get("date") || null },
       });
       toast("Pagamento registrato", "success"); render();
     } catch (err) { toast(err.message, "error"); }
   };
+  $$("[data-pdel]").forEach(b => b.onclick = () => confirmDialog("Eliminare questo pagamento?", async () => {
+    try { await api(`/documents/${id}/payments/${b.dataset.pdel}`, { method: "DELETE" }); toast("Pagamento eliminato", "success"); render(); }
+    catch (err) { toast(err.message, "error"); }
+  }));
+  if ($("#d-cancel")) $("#d-cancel").onclick = () => confirmDialog("Annullare questo documento? Resterà in archivio ma non conterà nei totali.", async () => {
+    try { await api(`/documents/${id}/status?status_value=annullata`, { method: "POST" }); toast("Documento annullato", "success"); render(); }
+    catch (err) { toast(err.message, "error"); }
+  }, "Annulla documento");
   if ($("#d-issue")) $("#d-issue").onclick = async () => {
     try { await api(`/documents/${id}/status?status_value=emessa`, { method: "POST" }); toast("Documento emesso", "success"); render(); }
     catch (err) { toast(err.message, "error"); }
@@ -1949,7 +1974,8 @@ route(/^\/documenti\/(\d+)$/, async (id) => {
     catch (err) { toast(err.message, "error"); }
   }, "Archivia");
   if ($("#d-unarchive")) $("#d-unarchive").onclick = async () => {
-    try { await api(`/documents/${id}/status?status_value=emessa`, { method: "POST" }); toast("Documento riattivato", "success"); render(); }
+    const target = doc.status === "annullata" ? "bozza" : "emessa";
+    try { await api(`/documents/${id}/status?status_value=${target}`, { method: "POST" }); toast("Documento riattivato", "success"); render(); }
     catch (err) { toast(err.message, "error"); }
   };
   if ($("#d-del")) $("#d-del").onclick = () => confirmDialog("Eliminare definitivamente questo documento? (solo bozze)", async () => {
@@ -1970,8 +1996,10 @@ function documentEditModal(doc) {
         ${field("project_id", "Commessa", { type: "select", id: "ne-project", options: `<option value="">— nessuna —</option>` })}
         ${field("date", "Data", { type: "date", value: doc.date })}
         ${field("due_date", "Scadenza", { type: "date", value: doc.due_date || "" })}
-        ${doc.status !== "pagata" ? field("discount", "Sconto (€)", { type: "number", step: "any", min: 0, value: doc.discount }) : ""}
-        ${doc.status !== "pagata" ? field("tax_rate", "IVA %", { type: "number", step: "any", min: 0, value: doc.tax_rate }) : ""}
+        ${doc.status !== "pagata" ? field("discount_pct", "Sconto %", { type: "number", step: "any", min: 0, value: doc.discount_pct || 0 }) : ""}
+        ${doc.status !== "pagata" ? field("discount", "Sconto aggiuntivo (€)", { type: "number", step: "any", min: 0, value: doc.discount }) : ""}
+        ${doc.status !== "pagata" ? field("tax_rate", "IVA %", { type: "number", step: "any", min: 0, id: "ne-tax", value: doc.tax_rate }) : ""}
+        ${doc.status !== "pagata" ? field("vat_nature", "Natura IVA (se 0%)", { type: "select", id: "ne-nature", options: vatNatureOptions(doc.vat_nature) }) : ""}
       </div>
       <div class="form-section">Note</div>
       ${field("notes", "Note a piè di documento", { type: "textarea", full: true, value: doc.notes })}
@@ -1994,7 +2022,9 @@ function documentEditModal(doc) {
       };
       if (doc.status !== "pagata") {
         payload.discount = num(fd.get("discount"));
+        payload.discount_pct = num(fd.get("discount_pct"));
         payload.tax_rate = num(fd.get("tax_rate"));
+        payload.vat_nature = fd.get("vat_nature") || "";
       }
       if (doc.kind === "DDT") {
         payload.ddt_reason = fd.get("ddt_reason") || "";
@@ -2011,6 +2041,11 @@ function documentEditModal(doc) {
     $("#ne-project").insertAdjacentHTML("beforeend",
       projects.map(p => `<option value="${p.id}" ${doc.project_id === p.id ? "selected" : ""}>${esc(p.number)} — ${esc(p.title)}</option>`).join(""));
   });
+  if ($("#ne-tax")) {
+    const syncNature = () => $("#ne-nature").closest("label").classList.toggle("hidden", num($("#ne-tax").value) !== 0);
+    $("#ne-tax").oninput = syncNature;
+    syncNature();
+  }
 }
 
 function printDocument(doc, client, s) {
@@ -2052,17 +2087,18 @@ function printDocument(doc, client, s) {
         <thead><tr><th>Descrizione</th><th style="width:80px">Qtà</th><th style="width:110px">Prezzo unit.</th><th style="width:110px">Totale</th></tr></thead>
         <tbody>
           ${doc.lines.map(l => `
-            <tr><td>${esc(l.description)}</td><td>${lineQty(l)}</td><td>${linePrice(l)}</td><td>${fmtEur(l.qty * l.price)}</td></tr>`).join("")}
+            <tr><td>${esc(l.description)}</td><td>${lineQty(l)}</td><td>${linePrice(l)}</td><td>${fmtEur(lineTotal(l))}</td></tr>`).join("")}
         </tbody>
       </table>
       <div class="p-totals">
         <div><span>Subtotale</span><span>${fmtEur(doc.subtotal)}</span></div>
-        ${doc.discount ? `<div><span>Sconto</span><span>- ${fmtEur(doc.discount)}</span></div>` : ""}
+        ${doc.discount_amount ? `<div><span>Sconto${doc.discount_pct ? " " + fmtNum(doc.discount_pct) + "%" : ""}</span><span>- ${fmtEur(doc.discount_amount)}</span></div>` : ""}
         <div><span>Imponibile</span><span>${fmtEur(doc.taxable)}</span></div>
-        <div><span>IVA ${fmtNum(doc.tax_rate)}%</span><span>${fmtEur(doc.tax)}</span></div>
+        <div><span>IVA ${fmtNum(doc.tax_rate)}%${doc.vat_nature ? " (" + esc(doc.vat_nature) + ")" : ""}</span><span>${fmtEur(doc.tax)}</span></div>
         <div class="grand"><span>TOTALE</span><span>${fmtEur(doc.total)}</span></div>
       </div>
       <div class="p-footer">
+        ${doc.due_date && doc.kind !== "DDT" ? "Scadenza pagamento: " + fmtDate(doc.due_date) + "<br>" : ""}
         ${s.iban ? "IBAN: " + esc(s.iban) + "<br>" : ""}
         ${doc.notes ? esc(doc.notes) + "<br>" : ""}
         Documento stampato il ${new Date().toLocaleString("it-IT")} — Cantiere Navale Pro
@@ -2580,6 +2616,18 @@ async function acqRegistro() {
       <div class="stat good"><div class="label">IVA a credito (acquisti)</div><div class="value money">${fmtEur(reg.summary.purchases_vat)}</div><div class="hint">imponibile ${fmtEur(reg.summary.purchases_net)}</div></div>
       <div class="stat ${reg.summary.balance >= 0 ? "bad" : "good"}"><div class="label">Saldo IVA</div><div class="value money">${fmtEur(Math.abs(reg.summary.balance))}</div><div class="hint">${reg.summary.balance >= 0 ? "a debito" : "a credito"}</div></div>
     </div>
+    ${(reg.sales_by_rate.length || reg.purchases_by_rate.length) ? `
+    <div class="card">
+      <h2>${icon("euro", 15)} Riepilogo per aliquota</h2>
+      <table class="tbl">
+        <thead><tr><th>Aliquota</th><th class="num">Imponibile vendite</th><th class="num">IVA vendite</th><th class="num">Imponibile acquisti</th><th class="num">IVA acquisti</th></tr></thead>
+        <tbody>${[...new Set([...reg.sales_by_rate, ...reg.purchases_by_rate].map(r => r.rate))].sort((a, b) => a - b).map(rate => {
+          const sl = reg.sales_by_rate.find(r => r.rate === rate) || { taxable: 0, vat: 0 };
+          const pu = reg.purchases_by_rate.find(r => r.rate === rate) || { taxable: 0, vat: 0 };
+          return `<tr><td>${fmtNum(rate)}%</td><td class="num">${fmtEur(sl.taxable)}</td><td class="num">${fmtEur(sl.vat)}</td><td class="num">${fmtEur(pu.taxable)}</td><td class="num">${fmtEur(pu.vat)}</td></tr>`;
+        }).join("")}</tbody>
+      </table>
+    </div>` : ""}
     <div class="grid-2">
       <div class="card">
         <h2>${icon("file", 15)} Vendite (${reg.sales.length})</h2>
@@ -3012,6 +3060,10 @@ route(/^\/impostazioni$/, async () => {
   if (isAdmin) {
     try { users = await api("/users"); } catch { users = []; }
   }
+  let backupInfo = null;
+  if (isAdmin) {
+    try { backupInfo = await api("/admin/backup/info"); } catch { backupInfo = null; }
+  }
   let lookupRows = {};
   if (isAdmin) {
     try { lookupRows = await loadLookupsFull(); } catch { lookupRows = {}; }
@@ -3051,6 +3103,10 @@ route(/^\/impostazioni$/, async () => {
           ${field("company_address", "Indirizzo", { value: s.company_address, full: true, disabled: !isAdmin })}
           ${field("company_zip", "CAP", { value: s.company_zip, disabled: !isAdmin })}
           ${field("company_city", "Città", { value: s.company_city, disabled: !isAdmin })}
+          ${field("company_province", "Provincia (sigla)", { value: s.company_province, disabled: !isAdmin })}
+          ${field("company_regime", "Regime fiscale (codice SdI)", { value: s.company_regime || "RF01", disabled: !isAdmin, placeholder: "RF01 = ordinario" })}
+          ${field("default_tax_rate", "IVA predefinita %", { type: "number", step: "any", min: 0, value: s.default_tax_rate ?? 22, disabled: !isAdmin })}
+          ${field("default_payment_days", "Scadenza predefinita (giorni)", { type: "number", min: 0, value: s.default_payment_days ?? 30, disabled: !isAdmin })}
           ${field("company_email", "Email", { value: s.company_email, disabled: !isAdmin })}
           ${field("company_phone", "Telefono", { value: s.company_phone, disabled: !isAdmin })}
           ${field("iban", "IBAN (stampato su documenti)", { value: s.iban, full: true, disabled: !isAdmin })}
@@ -3086,7 +3142,7 @@ route(/^\/impostazioni$/, async () => {
 
     <div class="card">
       <h2>${icon("db", 15)} Backup dati</h2>
-      <p style="color:var(--muted);margin-bottom:12px">Scarica una copia del database in un unico file.<br>Suggerimento: salvala in una cartella diversa (o su cloud) ogni settimana.</p>
+      <p style="color:var(--muted);margin-bottom:12px">Ogni giorno l'app crea da sola una copia del database (ultime 14 conservate)${backupInfo ? ` nella cartella <code>${esc(backupInfo.folder)}</code>${backupInfo.last ? " — ultima: " + fmtDateTime(backupInfo.last) : ""}` : ""}.<br>Per sicurezza copia ogni tanto la cartella dati anche su un altro disco o su cloud.</p>
       ${isAdmin ? `<button class="btn" id="btn-backup">${icon("download", 14)} Scarica backup del database</button>` : `<p style="color:var(--muted)">Solo gli amministratori possono scaricare il backup.</p>`}
     </div>
 
@@ -3095,7 +3151,7 @@ route(/^\/impostazioni$/, async () => {
       <form id="pw-form">
         <div class="form-grid">
           ${field("old_password", "Password attuale", { type: "password", required: true })}
-          ${field("new_password", "Nuova password (min 6)", { type: "password", required: true })}
+          ${field("new_password", "Nuova password (min 8)", { type: "password", required: true })}
         </div>
         <button class="btn btn-primary">Cambia password</button>
       </form>
@@ -3126,6 +3182,8 @@ route(/^\/impostazioni$/, async () => {
 
   $("#settings-form").onsubmit = async e => {    e.preventDefault();
     const payload = Object.fromEntries(new FormData(e.target).entries());
+    payload.default_tax_rate = num(payload.default_tax_rate);
+    payload.default_payment_days = parseInt(payload.default_payment_days) || 0;
     try {
       await api("/settings", { method: "PUT", json: payload });
       await loadSettings();
@@ -3142,6 +3200,7 @@ route(/^\/impostazioni$/, async () => {
       });
       toast("Password aggiornata", "success");
       e.target.reset();
+      CURRENT_USER.default_password = false;
     } catch (err) { toast(err.message, "error"); }
   };
   if ($("#btn-backup")) $("#btn-backup").onclick = () => downloadFile("/admin/backup", "cantiere_backup.db");

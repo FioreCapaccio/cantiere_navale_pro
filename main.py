@@ -155,7 +155,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
 
 if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False, "timeout": 30})
 else:
     engine = create_engine(DATABASE_URL)
 
@@ -169,6 +169,28 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Importi: i calcoli usano Decimal con arrotondamento commerciale (mezzo in su)
+# al centesimo, riga per riga, come fa una fattura elettronica.
+# ---------------------------------------------------------------------------
+
+from decimal import Decimal, ROUND_HALF_UP
+
+_CENT = Decimal("0.01")
+
+
+def D(value) -> Decimal:
+    return Decimal(str(value if value is not None else 0))
+
+
+def r2(value) -> Decimal:
+    return D(value).quantize(_CENT, rounding=ROUND_HALF_UP)
+
+
+def money(value) -> float:
+    return float(r2(value))
 
 
 # =========================
@@ -209,6 +231,7 @@ class Client(Base):
     discount = Column(Float, default=0)         # sconto abituale %
     website = Column(String, default="")
     secondary_phone = Column(String, default="")  # secondo telefono
+    sdi_code = Column(String, default="")       # codice destinatario SdI (7 caratteri)
     active = Column(Boolean, default=True)
     notes = Column(String, default="")
     created_at = Column(DateTime, default=datetime.now)
@@ -565,7 +588,9 @@ class Document(Base):
 
     status = Column(String, default="bozza")  # bozza, emessa, pagata, annullata
     tax_rate = Column(Float, default=22)
-    discount = Column(Float, default=0)
+    vat_nature = Column(String, default="")     # natura IVA (N1…N7): obbligatoria se aliquota 0
+    discount = Column(Float, default=0)         # sconto in euro
+    discount_pct = Column(Float, default=0)     # sconto in percentuale (si somma a quello in euro)
     notes = Column(String, default="")
 
     # Campi DDT
@@ -583,6 +608,18 @@ class Document(Base):
     payments = relationship("Payment", back_populates="document", cascade="all, delete-orphan")
     client = relationship("Client", back_populates="documents")
     project = relationship("Project", back_populates="documents")
+
+    @property
+    def total(self) -> float:
+        return document_totals(self)["total"]
+
+    @property
+    def paid(self) -> float:
+        return document_totals(self)["paid"]
+
+    @property
+    def residual(self) -> float:
+        return document_totals(self)["residual"]
 
 
 class DocumentLine(Base):
@@ -622,13 +659,17 @@ class AppSettings(Base):
     company_email = Column(String, default="")
     company_phone = Column(String, default="")
     iban = Column(String, default="")
+    company_province = Column(String, default="")
+    company_regime = Column(String, default="RF01")  # regime fiscale FatturaPA
+    default_tax_rate = Column(Float, default=22)
+    default_payment_days = Column(Integer, default=30)  # scadenza predefinita dei documenti
 
 
 # =========================
 # SCHEMAS
 # =========================
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ORMModel(BaseModel):
@@ -672,9 +713,10 @@ class ClientCreate(BaseModel):
     ship_to: Optional[str] = ""
     iban: Optional[str] = ""
     payment_terms: Optional[str] = ""
-    discount: Optional[float] = 0
+    discount: float = Field(0, ge=0, le=100)
     website: Optional[str] = ""
     secondary_phone: Optional[str] = ""
+    sdi_code: Optional[str] = ""
     active: Optional[bool] = True
     notes: Optional[str] = ""
 
@@ -706,6 +748,7 @@ class ClientOut(ORMModel):
     discount: float
     website: str
     secondary_phone: str
+    sdi_code: str
     active: bool
     notes: str
 
@@ -791,9 +834,9 @@ class ItemCreate(BaseModel):
     name: str
     category: Optional[str] = ""
     unit: Optional[str] = "pz"
-    cost: Optional[float] = 0
-    price: Optional[float] = 0
-    min_stock: Optional[float] = 0
+    cost: float = Field(0, ge=0)
+    price: float = Field(0, ge=0)
+    min_stock: float = Field(0, ge=0)
 
 
 class ItemUpdate(ItemCreate):
@@ -815,8 +858,8 @@ class MovementCreate(BaseModel):
     warehouse_id: int
     item_id: int
     type: str  # carico, scarico, reso
-    qty: float
-    unit_cost: Optional[float] = 0
+    qty: float = Field(gt=0)
+    unit_cost: Optional[float] = Field(None, ge=0)  # vuoto = costo medio dell'articolo
     note: Optional[str] = ""
     project_id: Optional[int] = None  # commessa di riferimento (opzionale)
 
@@ -863,10 +906,10 @@ class JobCreate(BaseModel):
     category: Optional[str] = "Manodopera"
     status: Optional[str] = "Da fare"
     priority: Optional[str] = "normale"
-    qty: Optional[float] = 1
+    qty: float = Field(1, ge=0)
     unit: Optional[str] = "pz"
-    unit_cost: Optional[float] = 0
-    unit_price: Optional[float] = 0
+    unit_cost: float = Field(0, ge=0)
+    unit_price: float = Field(0, ge=0)
     assigned_to: Optional[str] = ""
 
 
@@ -898,9 +941,9 @@ class AttachmentOut(ORMModel):
 
 
 class DocumentLineCreate(BaseModel):
-    description: str
-    qty: Optional[float] = 1
-    price: Optional[float] = 0
+    description: str = Field(min_length=1)
+    qty: float = Field(1, ge=0)
+    price: float = Field(0, ge=0)
     unit: Optional[str] = ""
 
 
@@ -919,8 +962,11 @@ class DocumentCreate(BaseModel):
     date: Optional[Date] = None
     due_date: Optional[Date] = None
     status: Optional[str] = "bozza"
-    tax_rate: Optional[float] = 22
-    discount: Optional[float] = 0
+    tax_rate: Optional[float] = Field(None, ge=0, le=100)  # vuoto = aliquota predefinita
+    vat_nature: Optional[str] = ""
+    discount: float = Field(0, ge=0)
+    discount_pct: Optional[float] = Field(None, ge=0, le=100)  # vuoto = sconto abituale del cliente
+    due_date_auto: bool = True
     notes: Optional[str] = ""
 
     ddt_reason: Optional[str] = ""
@@ -943,7 +989,12 @@ class DocumentOut(ORMModel):
     source_document_id: Optional[int]
     status: str
     tax_rate: float
+    vat_nature: str = ""
     discount: float
+    discount_pct: float = 0
+    total: float = 0
+    paid: float = 0
+    residual: float = 0
     notes: str
     ddt_reason: str
     ddt_carrier: str
@@ -962,8 +1013,10 @@ class DocumentUpdate(BaseModel):
     project_id: Optional[int] = None
     date: Optional[Date] = None
     due_date: Optional[Date] = None
-    discount: Optional[float] = None
-    tax_rate: Optional[float] = None
+    discount: Optional[float] = Field(None, ge=0)
+    discount_pct: Optional[float] = Field(None, ge=0, le=100)
+    tax_rate: Optional[float] = Field(None, ge=0, le=100)
+    vat_nature: Optional[str] = None
     notes: Optional[str] = None
 
     ddt_reason: Optional[str] = None
@@ -974,7 +1027,8 @@ class DocumentUpdate(BaseModel):
 
 
 class PaymentCreate(BaseModel):
-    amount: float
+    amount: float = Field(gt=0)
+    date: Optional[Date] = None
     method: Optional[str] = "bonifico"
     note: Optional[str] = ""
 
@@ -998,6 +1052,10 @@ class SettingsUpdate(BaseModel):
     company_email: Optional[str] = ""
     company_phone: Optional[str] = ""
     iban: Optional[str] = ""
+    company_province: Optional[str] = ""
+    company_regime: Optional[str] = "RF01"
+    default_tax_rate: float = Field(22, ge=0, le=100)
+    default_payment_days: int = Field(30, ge=0, le=365)
 
 
 class SettingsOut(ORMModel):
@@ -1011,6 +1069,10 @@ class SettingsOut(ORMModel):
     company_email: str
     company_phone: str
     iban: str
+    company_province: str = ""
+    company_regime: str = "RF01"
+    default_tax_rate: float = 22
+    default_payment_days: int = 30
 
 
 class UserCreate(BaseModel):
@@ -1081,8 +1143,8 @@ class PurchaseInvoiceCreate(BaseModel):
     number: Optional[str] = ""
     date: Optional[Date] = None
     due_date: Optional[Date] = None
-    amount_net: float
-    vat_rate: Optional[float] = 22
+    amount_net: float = Field(gt=0)
+    vat_rate: float = Field(22, ge=0, le=100)
     status: Optional[str] = "da_pagare"
     paid_date: Optional[Date] = None
     notes: Optional[str] = ""
@@ -1147,10 +1209,10 @@ class TimeEntryCreate(BaseModel):
     job_id: Optional[int] = None
     worker: Optional[str] = ""
     worker_id: Optional[int] = None
-    hourly_cost: Optional[float] = None   # se non dato, tariffa del lavoratore
-    hourly_price: Optional[float] = None
+    hourly_cost: Optional[float] = Field(None, ge=0)   # se non dato, tariffa del lavoratore
+    hourly_price: Optional[float] = Field(None, ge=0)
     date: Optional[Date] = None
-    hours: float
+    hours: float = Field(gt=0, le=24)
     notes: Optional[str] = ""
 
 
@@ -1172,8 +1234,8 @@ class TimeEntryOut(ORMModel):
 class WorkerCreate(BaseModel):
     name: str
     role: Optional[str] = ""
-    hourly_cost: Optional[float] = 0
-    hourly_price: Optional[float] = 0
+    hourly_cost: float = Field(0, ge=0)
+    hourly_price: float = Field(0, ge=0)
     active: Optional[bool] = True
     notes: Optional[str] = ""
     employee_code: Optional[str] = ""
@@ -1237,8 +1299,8 @@ class LookupOut(ORMModel):
 class PurchaseOrderLineCreate(BaseModel):
     item_id: Optional[int] = None
     description: str
-    qty: Optional[float] = 1
-    unit_cost: Optional[float] = 0
+    qty: float = Field(1, gt=0)
+    unit_cost: float = Field(0, ge=0)
 
 
 class PurchaseOrderLineOut(ORMModel):
@@ -1282,6 +1344,7 @@ from fastapi.responses import Response, FileResponse
 from jose import jwt, JWTError
 
 PBKDF2_ITERATIONS = 390_000
+MIN_PASSWORD = 8
 
 
 def hash_password(password: str) -> str:
@@ -1337,6 +1400,13 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+def require_manager(current_user: User = Depends(get_current_user)) -> User:
+    """Operazioni distruttive o amministrative: admin e manager (non gli operatori)."""
+    if current_user.role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="Operazione riservata a manager e amministratori")
+    return current_user
+
+
 # =========================
 # HELPERS
 # =========================
@@ -1366,11 +1436,20 @@ def get_or_create_stock(db: Session, warehouse_id: int, item_id: int) -> Stock:
     return stock
 
 
+def apply_average_cost(db: Session, item: Item, qty, unit_cost):
+    """Costo medio ponderato dell'articolo: a ogni carico con costo noto si
+    ricalcola in base alla giacenza totale (tutti i magazzini) già presente."""
+    unit_cost = D(unit_cost)
+    if unit_cost <= 0 or D(qty) <= 0:
+        return
+    on_hand = D(db.query(SQLFunc.sum(Stock.qty)).filter(Stock.item_id == item.id).scalar() or 0)
+    on_hand = max(on_hand, Decimal(0))
+    new_total = on_hand + D(qty)
+    item.cost = float(((on_hand * D(item.cost) + D(qty) * unit_cost) / new_total).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+
+
 def next_project_number(db: Session) -> str:
-    year = Date.today().year
-    prefix = f"COMM-{year}"
-    count = db.query(Project).filter(Project.number.like(f"{prefix}%")).count()
-    return f"{prefix}-{count + 1:05d}"
+    return _next_number(db, Project, f"COMM-{Date.today().year}-")
 
 
 def next_document_number(db: Session, kind: str) -> str:
@@ -1382,141 +1461,286 @@ def next_document_number(db: Session, kind: str) -> str:
     if kind not in prefixes:
         raise HTTPException(status_code=400, detail="Tipo documento non valido")
 
-    year = Date.today().year
-    prefix = f"{prefixes[kind]}-{year}"
-    count = db.query(Document).filter(Document.number.like(f"{prefix}%")).count()
-    return f"{prefix}-{count + 1:05d}"
+    return _next_number(db, Document, f"{prefixes[kind]}-{Date.today().year}-")
 
 
 def document_totals(doc: Document) -> dict:
-    subtotal = sum(line.qty * line.price for line in doc.lines)
-    discount = doc.discount or 0
-    taxable = max(0, subtotal - discount)
-    tax = taxable * (doc.tax_rate or 0) / 100
+    """Totali del documento. Ogni riga è arrotondata al centesimo; lo sconto
+    (percentuale + euro) non può superare il subtotale; l'IVA è calcolata
+    sull'imponibile e arrotondata una sola volta."""
+    subtotal = sum((r2(D(l.qty) * D(l.price)) for l in doc.lines), Decimal(0))
+    pct = min(max(D(doc.discount_pct), Decimal(0)), Decimal(100))
+    discount = min(r2(subtotal * pct / 100) + r2(doc.discount), subtotal)
+    taxable = subtotal - discount
+    tax = r2(taxable * D(doc.tax_rate) / 100)
     total = taxable + tax
-
+    paid = sum((r2(p.amount) for p in doc.payments), Decimal(0))
     return {
-        "subtotal": round(subtotal, 2),
-        "discount": round(discount, 2),
-        "taxable": round(taxable, 2),
-        "tax": round(tax, 2),
-        "total": round(total, 2),
+        "subtotal": float(subtotal),
+        "discount_amount": float(discount),
+        "taxable": float(taxable),
+        "tax": float(tax),
+        "total": float(total),
+        "paid": float(paid),
+        "residual": float(total - paid),
     }
+
+
+def _next_number(db: Session, model, prefix: str) -> str:
+    """Prossimo numero progressivo per prefisso (es. FT-2026-): parte dal
+    massimo esistente, così eliminare un documento non genera mai duplicati."""
+    last = 0
+    for (number,) in db.query(model.number).filter(model.number.like(f"{prefix}%")).all():
+        tail = (number or "")[len(prefix):]
+        if tail.isdigit():
+            last = max(last, int(tail))
+    return f"{prefix}{last + 1:05d}"
+
+
+def valid_partita_iva(vat: str) -> bool:
+    """Controlla formato e cifra di controllo di una partita IVA italiana."""
+    vat = (vat or "").strip()
+    if len(vat) != 11 or not vat.isdigit() or vat == "0" * 11:
+        return False
+    total = 0
+    for i, ch in enumerate(vat[:10]):
+        n = int(ch)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return (10 - total % 10) % 10 == int(vat[10])
+
+
+VAT_NATURES = {
+    "N1": "Escluse ex art. 15",
+    "N2.1": "Non soggette ad IVA - artt. da 7 a 7-septies",
+    "N2.2": "Non soggette - altri casi",
+    "N3.1": "Non imponibili - esportazioni",
+    "N3.2": "Non imponibili - cessioni intracomunitarie",
+    "N3.4": "Non imponibili - operazioni assimilate alle cessioni all'esportazione (art. 8-bis)",
+    "N3.5": "Non imponibili - a seguito di dichiarazioni d'intento",
+    "N4": "Esenti",
+    "N6.9": "Inversione contabile - altri casi",
+    "N7": "IVA assolta in altro stato UE",
+}
+
+
+def _xml_text(value, limit: int = 1000) -> str:
+    """Testo sicuro per XML: niente caratteri di controllo, lunghezza limitata."""
+    clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(value or "")).strip()
+    return escape(clean[:limit])
+
+
+def _num_xml(value, min_dec: int = 2, max_dec: int = 8) -> str:
+    text = f"{D(value):.{max_dec}f}".rstrip("0")
+    whole, _, frac = text.partition(".")
+    return f"{whole}.{frac.ljust(min_dec, '0')}"
+
+
+def check_invoice_ready(db: Session, doc: Document) -> List[str]:
+    """Elenco dei dati mancanti per poter emettere/esportare la fattura elettronica."""
+    problems = []
+    settings = get_settings(db)
+    client = db.get(Client, doc.client_id)
+    company_vat = (settings.company_vat or "").replace(" ", "").upper().removeprefix("IT")
+    if not valid_partita_iva(company_vat):
+        problems.append("P.IVA dell'azienda mancante o non valida (Impostazioni)")
+    if not (settings.company_address and settings.company_zip and settings.company_city):
+        problems.append("Indirizzo, CAP e città dell'azienda (Impostazioni)")
+    if not client:
+        problems.append("Cliente non trovato")
+    else:
+        vat = (client.vat or "").replace(" ", "").upper().removeprefix("IT")
+        if not vat and not (client.tax_code or "").strip():
+            problems.append(f"{client.name}: serve partita IVA o codice fiscale")
+        if vat and not valid_partita_iva(vat):
+            problems.append(f"{client.name}: partita IVA non valida")
+        if not (client.address and client.zip and client.city):
+            problems.append(f"{client.name}: indirizzo, CAP e città")
+    if not doc.lines:
+        problems.append("Il documento non ha righe")
+    elif document_totals(doc)["total"] <= 0:
+        problems.append("Il totale del documento deve essere maggiore di zero")
+    if not doc.tax_rate and doc.vat_nature not in VAT_NATURES:
+        problems.append("IVA 0%: indica la natura dell'operazione (es. N3.4)")
+    return problems
 
 
 def generate_fattura_xml(db: Session, doc: Document) -> str:
     client = db.get(Client, doc.client_id)
     if not client:
         raise HTTPException(status_code=400, detail="Cliente non trovato")
+    problems = check_invoice_ready(db, doc)
+    if problems:
+        raise HTTPException(status_code=400, detail="Fattura elettronica incompleta: " + "; ".join(problems))
 
     settings = get_settings(db)
     totals = document_totals(doc)
+    rate = D(doc.tax_rate)
+    nature = "" if rate else f"<Natura>{doc.vat_nature}</Natura>"
 
-    company_vat = (settings.company_vat or "").replace(" ", "").upper()
-    client_vat = (client.vat or "").replace(" ", "").upper()
+    company_vat = (settings.company_vat or "").replace(" ", "").upper().removeprefix("IT")
+    client_vat = (client.vat or "").replace(" ", "").upper().removeprefix("IT")
     client_tax_code = (client.tax_code or "").replace(" ", "").upper()
-
-    if client_vat.startswith("IT"):
-        client_vat = client_vat[2:]
 
     fiscale = ""
     if client_vat:
-        fiscale += f"""
-        <IdFiscaleIVA>
-          <IdPaese>IT</IdPaese>
-          <IdCodice>{escape(client_vat)}</IdCodice>
-        </IdFiscaleIVA>
-        """
+        fiscale += f"<IdFiscaleIVA><IdPaese>IT</IdPaese><IdCodice>{escape(client_vat)}</IdCodice></IdFiscaleIVA>"
     if client_tax_code:
         fiscale += f"<CodiceFiscale>{escape(client_tax_code)}</CodiceFiscale>"
 
-    linee_xml = ""
-    for i, line in enumerate(doc.lines, start=1):
-        prezzo_totale = line.qty * line.price
-        linee_xml += f"""
-        <DettaglioLinee>
-          <NumeroLinea>{i}</NumeroLinea>
-          <Descrizione>{escape(line.description)}</Descrizione>
-          <Quantita>{line.qty:.2f}</Quantita>
-          <PrezzoUnitario>{line.price:.2f}</PrezzoUnitario>
-          <PrezzoTotale>{prezzo_totale:.2f}</PrezzoTotale>
-          <AliquotaIVA>{doc.tax_rate:.2f}</AliquotaIVA>
-        </DettaglioLinee>
-        """
+    # Codice destinatario: SdI a 7 caratteri; P.A. a 6; altrimenti 0000000 (+ PEC)
+    sdi = (client.sdi_code or "").strip().upper()
+    pa = client.client_type == "P.A."
+    if pa and len(sdi) == 6:
+        formato, dest = "FPA12", sdi
+    else:
+        formato, dest = "FPR12", sdi if len(sdi) == 7 else "0000000"
+    pec = f"<PECDestinatario>{_xml_text(client.pec, 256)}</PECDestinatario>" if dest == "0000000" and client.pec else ""
 
-    comune = settings.company_city or "-"
-    cap = settings.company_zip or "00000"
-    prog_invio = re.sub(r"[^A-Za-z0-9\-_.]", "-", doc.number)
+    lines = []
+    num = 0
+    for line in doc.lines:
+        num += 1
+        lines.append(f"""
+      <DettaglioLinee>
+        <NumeroLinea>{num}</NumeroLinea>
+        <Descrizione>{_xml_text(line.description)}</Descrizione>
+        <Quantita>{_num_xml(line.qty)}</Quantita>{f"<UnitaMisura>{_xml_text(line.unit, 10)}</UnitaMisura>" if line.unit else ""}
+        <PrezzoUnitario>{_num_xml(line.price)}</PrezzoUnitario>
+        <PrezzoTotale>{r2(D(line.qty) * D(line.price))}</PrezzoTotale>
+        <AliquotaIVA>{rate:.2f}</AliquotaIVA>{nature}
+      </DettaglioLinee>""")
+    if totals["discount_amount"]:
+        num += 1
+        lines.append(f"""
+      <DettaglioLinee>
+        <NumeroLinea>{num}</NumeroLinea>
+        <Descrizione>Sconto</Descrizione>
+        <Quantita>1.00</Quantita>
+        <PrezzoUnitario>-{r2(totals['discount_amount'])}</PrezzoUnitario>
+        <PrezzoTotale>-{r2(totals['discount_amount'])}</PrezzoTotale>
+        <AliquotaIVA>{rate:.2f}</AliquotaIVA>{nature}
+      </DettaglioLinee>""")
 
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    riepilogo = f"""
+      <DatiRiepilogo>
+        <AliquotaIVA>{rate:.2f}</AliquotaIVA>{nature}
+        <ImponibileImporto>{r2(totals['taxable'])}</ImponibileImporto>
+        <Imposta>{r2(totals['tax'])}</Imposta>
+        <EsigibilitaIVA>I</EsigibilitaIVA>
+      </DatiRiepilogo>"""
+
+    iban = (settings.iban or "").replace(" ", "").upper()
+    due = doc.due_date
+    pagamento = f"""
+    <DatiPagamento>
+      <CondizioniPagamento>TP02</CondizioniPagamento>
+      <DettaglioPagamento>
+        <ModalitaPagamento>{"MP05" if iban else "MP01"}</ModalitaPagamento>{f"<DataScadenzaPagamento>{due.isoformat()}</DataScadenzaPagamento>" if due else ""}
+        <ImportoPagamento>{r2(totals['total'])}</ImportoPagamento>{f"<IBAN>{escape(iban)}</IBAN>" if iban else ""}
+      </DettaglioPagamento>
+    </DatiPagamento>"""
+
+    causale = f"<Causale>{_xml_text(doc.notes, 200)}</Causale>" if doc.notes else ""
+    c_prov = (client.province or "").strip().upper()[:2]
+    s_prov = (settings.company_province or "").strip().upper()[:2]
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
 <p:FatturaElettronica
   xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
   xmlns:p="http://ivaservizi.agenziaentrate.gov.it/docs/xsd/fatture/v1.2"
-  versione="FPR12">
-
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  versione="{formato}">
   <FatturaElettronicaHeader>
     <DatiTrasmissione>
-      <IdTrasmittente>
-        <IdPaese>IT</IdPaese>
-        <IdCodice>{escape(company_vat)}</IdCodice>
-      </IdTrasmittente>
-      <ProgressivoInvio>{escape(prog_invio[:20])}</ProgressivoInvio>
-      <FormatoTrasmissione>FPR12</FormatoTrasmissione>
-      <CodiceDestinatario>0000000</CodiceDestinatario>
+      <IdTrasmittente><IdPaese>IT</IdPaese><IdCodice>{escape(company_vat)}</IdCodice></IdTrasmittente>
+      <ProgressivoInvio>{doc.id}</ProgressivoInvio>
+      <FormatoTrasmissione>{formato}</FormatoTrasmissione>
+      <CodiceDestinatario>{dest}</CodiceDestinatario>{pec}
     </DatiTrasmissione>
-
     <CedentePrestatore>
       <DatiAnagrafici>
-        <IdFiscaleIVA>
-          <IdPaese>IT</IdPaese>
-          <IdCodice>{escape(company_vat)}</IdCodice>
-        </IdFiscaleIVA>
-        <Anagrafica>
-          <Denominazione>{escape(settings.company_name)}</Denominazione>
-        </Anagrafica>
+        <IdFiscaleIVA><IdPaese>IT</IdPaese><IdCodice>{escape(company_vat)}</IdCodice></IdFiscaleIVA>{f"<CodiceFiscale>{_xml_text(settings.company_tax_code, 16)}</CodiceFiscale>" if settings.company_tax_code else ""}
+        <Anagrafica><Denominazione>{_xml_text(settings.company_name, 80)}</Denominazione></Anagrafica>
+        <RegimeFiscale>{_xml_text(settings.company_regime or "RF01", 4)}</RegimeFiscale>
       </DatiAnagrafici>
       <Sede>
-        <Indirizzo>{escape(settings.company_address or '-')}</Indirizzo>
-        <Comune>{escape(comune)}</Comune>
-        <CAP>{escape(cap)}</CAP>
+        <Indirizzo>{_xml_text(settings.company_address, 60)}</Indirizzo>
+        <CAP>{_xml_text(settings.company_zip, 5)}</CAP>
+        <Comune>{_xml_text(settings.company_city, 60)}</Comune>{f"<Provincia>{s_prov}</Provincia>" if len(s_prov) == 2 else ""}
         <Nazione>IT</Nazione>
       </Sede>
     </CedentePrestatore>
-
     <CessionarioCommittente>
       <DatiAnagrafici>
         {fiscale}
-        <Anagrafica>
-          <Denominazione>{escape(client.name)}</Denominazione>
-        </Anagrafica>
+        <Anagrafica><Denominazione>{_xml_text(client.name, 80)}</Denominazione></Anagrafica>
       </DatiAnagrafici>
       <Sede>
-        <Indirizzo>{escape(client.address or '-')}</Indirizzo>
-        <Comune>-</Comune>
-        <CAP>00000</CAP>
+        <Indirizzo>{_xml_text(client.address, 60)}</Indirizzo>
+        <CAP>{_xml_text(client.zip, 5)}</CAP>
+        <Comune>{_xml_text(client.city, 60)}</Comune>{f"<Provincia>{c_prov}</Provincia>" if len(c_prov) == 2 else ""}
         <Nazione>IT</Nazione>
       </Sede>
     </CessionarioCommittente>
   </FatturaElettronicaHeader>
-
   <FatturaElettronicaBody>
     <DatiGenerali>
       <DatiGeneraliDocumento>
         <TipoDocumento>TD01</TipoDocumento>
         <Divisa>EUR</Divisa>
         <Data>{doc.date.isoformat()}</Data>
-        <Numero>{escape(doc.number)}</Numero>
-        <ImportoTotaleDocumento>{totals['total']:.2f}</ImportoTotaleDocumento>
+        <Numero>{_xml_text(doc.number, 20)}</Numero>
+        <ImportoTotaleDocumento>{r2(totals['total'])}</ImportoTotaleDocumento>{causale}
       </DatiGeneraliDocumento>
     </DatiGenerali>
-
-    <DatiBeniServizi>
-      {linee_xml}
-    </DatiBeniServizi>
+    <DatiBeniServizi>{"".join(lines)}{riepilogo}
+    </DatiBeniServizi>{pagamento}
   </FatturaElettronicaBody>
 </p:FatturaElettronica>
 """
-    return xml
+
+
+MAX_UPLOAD_MB = 100
+
+
+def save_upload(upload: UploadFile, dest: str) -> int:
+    """Salva un file caricato a blocchi, con limite di dimensione. Ritorna i byte scritti."""
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    size = 0
+    try:
+        with open(dest, "wb") as out:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(status_code=413, detail=f"File troppo grande (massimo {MAX_UPLOAD_MB} MB)")
+                out.write(chunk)
+    except Exception:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise
+    return size
+
+
+def resolve_stored_path(stored: str) -> str:
+    """Percorso reale di un file caricato. Se la cartella dati è stata spostata
+    (copia dell'app su un altro disco) ricostruisce il percorso da `uploads/`."""
+    if stored and os.path.exists(stored):
+        return stored
+    norm = (stored or "").replace("\\", "/")
+    if "/uploads/" in norm:
+        candidate = os.path.join(UPLOAD_DIR, norm.split("/uploads/", 1)[1])
+        if os.path.exists(candidate):
+            return candidate
+    return stored
 
 
 def sanitize_filename(name: str) -> str:
@@ -1531,15 +1755,49 @@ def sanitize_filename(name: str) -> str:
 
 from sqlalchemy import text as SQLText
 
-app = FastAPI(title="Cantiere Navale Pro", version="2.1")
+app = FastAPI(title="Cantiere Navale Pro", version="2.2")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.url.path.startswith("/static/") or request.url.path == "/":
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
+_FIELD_LABELS = {
+    "qty": "quantità", "price": "prezzo", "amount": "importo", "hours": "ore",
+    "tax_rate": "IVA", "discount": "sconto", "discount_pct": "sconto %", "unit_cost": "costo unitario",
+    "cost": "costo", "amount_net": "imponibile", "name": "nome", "description": "descrizione",
+}
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request, exc: RequestValidationError):
+    """Errori di validazione leggibili (il frontend mostra `detail` come testo)."""
+    messages = []
+    for err in exc.errors():
+        field = str(err["loc"][-1]) if err.get("loc") else "campo"
+        label = _FIELD_LABELS.get(field, field)
+        kind = err.get("type", "")
+        if kind == "missing":
+            messages.append(f"{label}: campo obbligatorio")
+        elif kind in ("greater_than", "greater_than_equal"):
+            messages.append(f"{label}: valore troppo basso (minimo {err.get('ctx', {}).get('ge', err.get('ctx', {}).get('gt', 0))})")
+        elif kind in ("less_than", "less_than_equal"):
+            messages.append(f"{label}: valore troppo alto (massimo {err.get('ctx', {}).get('le', err.get('ctx', {}).get('lt', ''))})")
+        elif kind == "string_too_short":
+            messages.append(f"{label}: campo obbligatorio")
+        else:
+            messages.append(f"{label}: valore non valido")
+    return JSONResponse(status_code=422, content={"detail": "; ".join(messages) or "Dati non validi"})
 
 
 # Colonne aggiunte nelle versioni recenti: chi apre un vecchio database
@@ -1564,6 +1822,7 @@ _MIGRATIONS = {
         ("created_at", "DATETIME"),
         ("website", "VARCHAR DEFAULT ''"),
         ("secondary_phone", "VARCHAR DEFAULT ''"),
+        ("sdi_code", "VARCHAR DEFAULT ''"),
     ],
     "boats": [
         ("length", "FLOAT"),
@@ -1614,6 +1873,14 @@ _MIGRATIONS = {
     ],
     "documents": [
         ("created_by", "VARCHAR DEFAULT ''"),
+        ("discount_pct", "FLOAT DEFAULT 0"),
+        ("vat_nature", "VARCHAR DEFAULT ''"),
+    ],
+    "app_settings": [
+        ("company_province", "VARCHAR DEFAULT ''"),
+        ("company_regime", "VARCHAR DEFAULT 'RF01'"),
+        ("default_tax_rate", "FLOAT DEFAULT 22"),
+        ("default_payment_days", "INTEGER DEFAULT 30"),
     ],
     "document_lines": [
         ("unit", "VARCHAR DEFAULT ''"),
@@ -1685,6 +1952,9 @@ def startup():
         get_settings(db)
         db.commit()
 
+        if DATABASE_URL.startswith("sqlite"):
+            threading.Thread(target=_backup_loop, daemon=True).start()
+
         if OPEN_BROWSER:
             url = f"http://127.0.0.1:{PORT}"
             threading.Timer(1.5, lambda: webbrowser.open(url)).start()
@@ -1696,24 +1966,51 @@ def startup():
 # AUTH ROUTES
 # =========================
 
+_LOGIN_FAILS: dict = {}
+_LOGIN_MAX_FAILS = 5
+_LOGIN_WINDOW = 300  # secondi
+
+
+def _login_blocked(key: str) -> int:
+    """Secondi residui di blocco per questo utente (0 = libero)."""
+    now = datetime.now().timestamp()
+    fails = [t for t in _LOGIN_FAILS.get(key, []) if now - t < _LOGIN_WINDOW]
+    _LOGIN_FAILS[key] = fails
+    if len(fails) >= _LOGIN_MAX_FAILS:
+        return int(_LOGIN_WINDOW - (now - fails[0])) + 1
+    return 0
+
+
 @app.post("/auth/token", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    key = (form_data.username or "").strip().lower()
+    wait = _login_blocked(key)
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Troppi tentativi falliti: riprova tra {max(1, wait // 60 + (1 if wait % 60 else 0))} minuti",
+        )
     user = db.query(User).filter(User.username == form_data.username).first()
 
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    if not user or not user.active or not verify_password(form_data.password, user.hashed_password):
+        _LOGIN_FAILS.setdefault(key, []).append(datetime.now().timestamp())
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Username o password errati",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    _LOGIN_FAILS.pop(key, None)
     token = create_access_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
 
-@app.get("/auth/me", response_model=UserOut)
+@app.get("/auth/me")
 def me(current_user: User = Depends(get_current_user)):
-    return current_user
+    out = UserOut.model_validate(current_user).model_dump()
+    # avvisa se l'account usa ancora la password predefinita del primo avvio
+    out["default_password"] = verify_password(ADMIN_PASSWORD, current_user.hashed_password)
+    return out
 
 
 @app.post("/auth/change-password")
@@ -1724,8 +2021,10 @@ def change_password(
 ):
     if not verify_password(payload.old_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Password attuale non corretta")
-    if len(payload.new_password) < 6:
-        raise HTTPException(status_code=400, detail="La nuova password deve avere almeno 6 caratteri")
+    if len(payload.new_password) < MIN_PASSWORD:
+        raise HTTPException(status_code=400, detail=f"La nuova password deve avere almeno {MIN_PASSWORD} caratteri")
+    if payload.new_password == ADMIN_PASSWORD:
+        raise HTTPException(status_code=400, detail="Scegli una password diversa da quella predefinita")
 
     current_user.hashed_password = hash_password(payload.new_password)
     db.commit()
@@ -1741,16 +2040,27 @@ def dashboard(db: Session = Depends(get_db), _: User = Depends(get_current_user)
     year = Date.today().year
     today = Date.today()
 
+    # Fatturato e incassi: solo fatture emesse o pagate (le bozze non contano)
     invoices = db.query(Document).filter(
         Document.kind == "Fattura",
-        Document.status.notin_(["annullata", "archiviata"])
+        Document.status.in_(["emessa", "pagata"])
     ).all()
-    invoiced = 0.0
-    collected = 0.0
+    invoiced = Decimal(0)
+    collected = Decimal(0)
+    to_collect = Decimal(0)
+    invoiced_year = Decimal(0)
     for inv in invoices:
-        totals = document_totals(inv)
-        invoiced += totals["total"]
-        collected += sum(p.amount for p in inv.payments)
+        t = document_totals(inv)
+        invoiced += D(t["total"])
+        collected += D(t["paid"])
+        to_collect += D(t["residual"])
+        if inv.date and inv.date.year == year:
+            invoiced_year += D(t["total"])
+
+    payables = db.query(PurchaseInvoice).filter(PurchaseInvoice.status == "da_pagare").all()
+    to_pay = sum((D(_invoice_out(db, i)["total"]) for i in payables), Decimal(0))
+    payables_overdue = [i for i in payables if i.due_date and i.due_date < today]
+    payables_overdue_total = sum((D(_invoice_out(db, i)["total"]) for i in payables_overdue), Decimal(0))
 
     clients_map = {c.id: c.name for c in db.query(Client).all()}
 
@@ -1765,10 +2075,8 @@ def dashboard(db: Session = Depends(get_db), _: User = Depends(get_current_user)
     # Fatture non saldate oltre la scadenza
     overdue_rows = []
     for inv in invoices:
-        totals = document_totals(inv)
-        paid = sum(p.amount for p in inv.payments)
-        residual = round(totals["total"] - paid, 2)
-        if residual > 0.009 and inv.due_date and inv.due_date < today:
+        residual = document_totals(inv)["residual"]
+        if residual > 0 and inv.due_date and inv.due_date < today:
             overdue_rows.append({
                 "id": inv.id, "number": inv.number, "client_id": inv.client_id,
                 "client_name": clients_map.get(inv.client_id, ""),
@@ -1785,7 +2093,7 @@ def dashboard(db: Session = Depends(get_db), _: User = Depends(get_current_user)
         recent_docs.append({
             **DocumentOut.model_validate(d).model_dump(),
             "client_name": clients_map.get(d.client_id, ""),
-            "total": document_totals(d)["total"],
+            "total": d.total,
         })
 
     # articoli sotto scorta minima
@@ -1840,13 +2148,18 @@ def dashboard(db: Session = Depends(get_db), _: User = Depends(get_current_user)
         "boats": db.query(Boat).count(),
         "open_projects": db.query(Project).filter(Project.status.in_(["aperta", "in_lavorazione"])).count(),
         "total_projects": db.query(Project).count(),
-        "documents_this_year": db.query(Document).filter(Document.number.like(f"%-{year}-%")).count(),
-        "invoiced": round(invoiced, 2),
-        "collected": round(collected, 2),
-        "to_collect": round(max(0, invoiced - collected), 2),
-        "inventory_value": round(inventory_value, 2),
+        "documents_this_year": db.query(Document).filter(
+            Document.date >= Date(year, 1, 1), Document.date <= Date(year, 12, 31)).count(),
+        "invoiced": money(invoiced),
+        "invoiced_year": money(invoiced_year),
+        "collected": money(collected),
+        "to_collect": money(to_collect),
+        "to_pay": money(to_pay),
+        "payables_overdue_count": len(payables_overdue),
+        "payables_overdue_total": money(payables_overdue_total),
+        "inventory_value": money(inventory_value),
         "overdue_count": len(overdue_rows),
-        "overdue_total": round(sum(r["residual"] for r in overdue_rows), 2),
+        "overdue_total": money(sum((D(r["residual"]) for r in overdue_rows), Decimal(0))),
         "overdue": overdue_rows[:5],
         "low_stock": low_stock,
         "agenda_alerts": agenda_alerts,
@@ -1939,20 +2252,17 @@ def client_detail(client_id: int, db: Session = Depends(get_db), _: User = Depen
     projects = db.query(Project).filter(Project.client_id == client_id).order_by(Project.id.desc()).all()
     docs = db.query(Document).filter(Document.client_id == client_id).order_by(Document.id.desc()).all()
 
-    invoiced = 0.0
-    to_collect = 0.0
+    invoiced = Decimal(0)
+    to_collect = Decimal(0)
     doc_rows = []
     for d in docs:
         totals = document_totals(d)
-        paid = sum(p.amount for p in d.payments)
-        if d.kind == "Fattura" and d.status not in ("annullata", "archiviata"):
-            invoiced += totals["total"]
-            to_collect += max(0, totals["total"] - paid)
+        if d.kind == "Fattura" and d.status in ("emessa", "pagata"):
+            invoiced += D(totals["total"])
+            to_collect += D(totals["residual"])
         doc_rows.append({
             **DocumentOut.model_validate(d).model_dump(),
             "client_name": client.name,
-            "total": totals["total"],
-            "paid": round(paid, 2),
         })
 
     return {
@@ -1964,14 +2274,14 @@ def client_detail(client_id: int, db: Session = Depends(get_db), _: User = Depen
             "boats": len(boats),
             "projects": len(projects),
             "documents": len(docs),
-            "invoiced": round(invoiced, 2),
-            "to_collect": round(to_collect, 2),
+            "invoiced": money(invoiced),
+            "to_collect": money(to_collect),
         },
     }
 
 
 @app.delete("/clients/{client_id}", status_code=204)
-def delete_client(client_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_client(client_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     client = db.get(Client, client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Cliente non trovato")
@@ -2019,7 +2329,7 @@ def update_boat(boat_id: int, payload: BoatUpdate, db: Session = Depends(get_db)
 
 
 @app.delete("/boats/{boat_id}", status_code=204)
-def delete_boat(boat_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_boat(boat_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     boat = db.get(Boat, boat_id)
     if not boat:
         raise HTTPException(status_code=404, detail="Imbarcazione non trovata")
@@ -2042,17 +2352,13 @@ def boat_detail(boat_id: int, db: Session = Depends(get_db), _: User = Depends(g
         if project_ids else []
 
     doc_rows = []
-    invoiced = 0.0
+    invoiced = Decimal(0)
     for d in docs:
-        totals = document_totals(d)
-        paid = sum(p.amount for p in d.payments)
-        if d.kind == "Fattura" and d.status not in ("annullata", "archiviata"):
-            invoiced += totals["total"]
+        if d.kind == "Fattura" and d.status in ("emessa", "pagata"):
+            invoiced += D(d.total)
         doc_rows.append({
             **DocumentOut.model_validate(d).model_dump(),
             "client_name": boat.client.name if boat.client else "",
-            "total": totals["total"],
-            "paid": round(paid, 2),
         })
 
     return {
@@ -2063,7 +2369,7 @@ def boat_detail(boat_id: int, db: Session = Depends(get_db), _: User = Depends(g
         "stats": {
             "projects": len(projects),
             "documents": len(docs),
-            "invoiced": round(invoiced, 2),
+            "invoiced": money(invoiced),
         },
     }
 
@@ -2142,7 +2448,7 @@ def update_item(item_id: int, payload: ItemUpdate, db: Session = Depends(get_db)
 
 
 @app.delete("/items/{item_id}", status_code=204)
-def delete_item(item_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_item(item_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     item = db.get(Item, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Articolo non trovato")
@@ -2238,20 +2544,24 @@ def create_movement(
         raise HTTPException(status_code=404, detail="Commessa non trovata")
 
     stock = get_or_create_stock(db, payload.warehouse_id, payload.item_id)
+    # costo non indicato: usa il costo medio dell'articolo (così la commessa lo contabilizza)
+    unit_cost = payload.unit_cost if payload.unit_cost is not None else (item.cost or 0)
 
     if payload.type == "scarico":
         if stock.qty < payload.qty:
             raise HTTPException(status_code=400, detail=f"Giacenza insufficiente: disponibile {stock.qty}")
-        stock.qty -= payload.qty
+        stock.qty = float(D(stock.qty) - D(payload.qty))
     else:
-        stock.qty += payload.qty
+        if payload.type == "carico":
+            apply_average_cost(db, item, payload.qty, unit_cost)
+        stock.qty = float(D(stock.qty) + D(payload.qty))
 
     movement = Movement(
         warehouse_id=payload.warehouse_id,
         item_id=payload.item_id,
         type=payload.type,
         qty=payload.qty,
-        unit_cost=payload.unit_cost or 0,
+        unit_cost=unit_cost,
         note=payload.note or "",
         user_id=current_user.id,
         project_id=payload.project_id,
@@ -2340,7 +2650,8 @@ def update_movement(
     movement.qty = data["qty"]
     movement.warehouse_id = data["warehouse_id"]
     movement.item_id = data["item_id"]
-    movement.unit_cost = data.get("unit_cost") or 0
+    if data.get("unit_cost") is not None:
+        movement.unit_cost = data["unit_cost"]
     movement.note = data.get("note") or ""
     movement.project_id = data.get("project_id")
 
@@ -2350,7 +2661,7 @@ def update_movement(
 
 
 @app.delete("/movements/{movement_id}", status_code=204)
-def delete_movement(movement_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_movement(movement_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     movement = db.get(Movement, movement_id)
     if not movement:
         raise HTTPException(status_code=404, detail="Movimento non trovato")
@@ -2403,7 +2714,7 @@ def delete_project_objects(db: Session, project: Project):
     """Cancella dati collegati a una commessa (allegati su disco inclusi)."""
     for attachment in list(project.attachments):
         try:
-            os.remove(attachment.stored_path)
+            os.remove(resolve_stored_path(attachment.stored_path))
         except OSError:
             pass
         db.delete(attachment)
@@ -2489,7 +2800,7 @@ def set_project_status(
 
 
 @app.delete("/projects/{project_id}", status_code=204)
-def delete_project(project_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_project(project_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Commessa non trovata")
@@ -2558,15 +2869,14 @@ def upload_attachment(
     stored_filename = f"{uuid.uuid4().hex}_{safe_name}"
     path = os.path.join(folder, stored_filename)
 
-    with open(path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    size = save_upload(file, path)
 
     attachment = Attachment(
         project_id=project_id,
         filename=safe_name,
         stored_path=path,
         content_type=file.content_type or "application/octet-stream",
-        file_size=os.path.getsize(path),
+        file_size=size,
         user_id=current_user.id
     )
 
@@ -2590,11 +2900,12 @@ def download_attachment(
     _: User = Depends(get_current_user)
 ):
     attachment = db.get(Attachment, attachment_id)
-    if not attachment or not os.path.exists(attachment.stored_path):
+    path = resolve_stored_path(attachment.stored_path) if attachment else ""
+    if not attachment or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Allegato non trovato")
 
     return FileResponse(
-        attachment.stored_path,
+        path,
         filename=attachment.filename,
         media_type=attachment.content_type
     )
@@ -2606,7 +2917,7 @@ def delete_attachment(attachment_id: int, db: Session = Depends(get_db), _: User
     if not attachment:
         raise HTTPException(status_code=404, detail="Allegato non trovato")
     try:
-        os.remove(attachment.stored_path)
+        os.remove(resolve_stored_path(attachment.stored_path))
     except OSError:
         pass
     db.delete(attachment)
@@ -2632,14 +2943,18 @@ def create_document_from_project(
     if not jobs:
         raise HTTPException(status_code=400, detail="La commessa non ha lavori: aggiungi almeno un lavoro prima")
 
+    client = db.get(Client, project.client_id)
+    settings = get_settings(db)
     doc = Document(
         kind=kind,
         number=next_document_number(db, kind),
         date=Date.today(),
+        due_date=_default_due_date(db, client, Date.today()) if kind != "DDT" else None,
         client_id=project.client_id,
         project_id=project.id,
         status="bozza",
-        tax_rate=22,
+        tax_rate=settings.default_tax_rate,
+        discount_pct=client.discount or 0,
         notes=f"Generato da commessa {project.number}",
         lines=[
             DocumentLine(
@@ -2679,7 +2994,7 @@ def list_documents(
     if client_id:
         query = query.filter(Document.client_id == client_id)
     if year:
-        query = query.filter(Document.number.like(f"%-{year}-%"))
+        query = query.filter(Document.date >= Date(year, 1, 1), Document.date <= Date(year, 12, 31))
     if q:
         query = query.filter(Document.number.like(f"%{q}%"))
     return query.order_by(Document.id.desc()).all()
@@ -2721,15 +3036,16 @@ def export_documents_csv(db: Session = Depends(get_db), _: User = Depends(get_cu
     clients_map = {c.id: c.name for c in db.query(Client).all()}
     out = io_mod.StringIO()
     writer = csv_mod.writer(out, delimiter=";", quoting=csv_mod.QUOTE_MINIMAL)
-    writer.writerow(["Numero", "Tipo", "Data", "Scadenza", "Cliente", "Stato", "Totale", "Pagato"])
+    writer.writerow(["Numero", "Tipo", "Data", "Scadenza", "Cliente", "Stato", "Imponibile", "IVA", "Totale", "Pagato", "Residuo"])
     for d in db.query(Document).order_by(Document.id).all():
         totals = document_totals(d)
-        paid = sum(p.amount for p in d.payments)
         writer.writerow([
             d.number, d.kind, d.date.isoformat() if d.date else "",
             d.due_date.isoformat() if d.due_date else "",
             clients_map.get(d.client_id, ""), d.status,
-            f"{totals['total']:.2f}".replace(".", ","), f"{paid:.2f}".replace(".", ","),
+            f"{totals['taxable']:.2f}".replace(".", ","), f"{totals['tax']:.2f}".replace(".", ","),
+            f"{totals['total']:.2f}".replace(".", ","), f"{totals['paid']:.2f}".replace(".", ","),
+            f"{totals['residual']:.2f}".replace(".", ","),
         ])
     content = out.getvalue().encode("utf-8-sig")
     filename = quote(f"documenti_{Date.today()}.csv")
@@ -2737,6 +3053,14 @@ def export_documents_csv(db: Session = Depends(get_db), _: User = Depends(get_cu
         content=content, media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
     )
+
+
+def _default_due_date(db: Session, client: Client, base: Date) -> Optional[Date]:
+    """Scadenza: giorni indicati nelle condizioni di pagamento del cliente
+    (es. "30 gg", "RIBA 60"), altrimenti il valore predefinito di Impostazioni."""
+    m = re.search(r"\d+", client.payment_terms or "")
+    days = int(m.group()) if m else (get_settings(db).default_payment_days or 0)
+    return base + timedelta(days=days) if days else None
 
 
 @app.post("/documents", response_model=DocumentOut, status_code=201)
@@ -2757,10 +3081,17 @@ def create_document(
         if not project:
             raise HTTPException(status_code=404, detail="Commessa non trovata")
 
-    doc_data = payload.model_dump(exclude={"lines"})
+    doc_data = payload.model_dump(exclude={"lines", "due_date_auto"})
     # senza data esplicita il default SQL non scatta: impostala qui
     if not doc_data.get("date"):
         doc_data["date"] = Date.today()
+    # valori non indicati: aliquota predefinita e sconto abituale del cliente
+    if doc_data.get("tax_rate") is None:
+        doc_data["tax_rate"] = get_settings(db).default_tax_rate
+    if doc_data.get("discount_pct") is None:
+        doc_data["discount_pct"] = client.discount or 0
+    if payload.kind != "DDT" and not doc_data.get("due_date") and payload.due_date_auto:
+        doc_data["due_date"] = _default_due_date(db, client, doc_data["date"])
 
     doc = Document(**doc_data, number=next_document_number(db, payload.kind), created_by=current_user.username)
 
@@ -2820,11 +3151,27 @@ def update_document(
     if "project_id" in data and data["project_id"] is not None and not db.get(Project, data["project_id"]):
         raise HTTPException(status_code=404, detail="Commessa non trovata")
 
+    if data.get("date") is None:
+        data.pop("date", None)  # la data non si cancella
     for key, value in data.items():
         setattr(doc, key, value)
+    _check_not_below_paid(db, doc)
     db.commit()
     db.refresh(doc)
     return doc
+
+
+def _check_not_below_paid(db: Session, doc: Document):
+    """Dopo una modifica agli importi il totale non può scendere sotto l'incassato."""
+    db.flush()
+    db.refresh(doc)
+    t = document_totals(doc)
+    if t["residual"] < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Modifica non consentita: il totale ({t['total']:.2f} €) sarebbe inferiore a quanto già incassato ({t['paid']:.2f} €)".replace(".", ","),
+        )
+    _sync_payment_status(doc)
 
 
 @app.post("/documents/{document_id}/lines", response_model=DocumentOut)
@@ -2842,6 +3189,7 @@ def add_document_line(
 
     line = DocumentLine(document_id=document_id, **payload.model_dump())
     db.add(line)
+    _check_not_below_paid(db, doc)
     db.commit()
     db.refresh(doc)
     return doc
@@ -2864,6 +3212,7 @@ def delete_document_line(
     if not line or line.document_id != document_id:
         raise HTTPException(status_code=404, detail="Riga non trovata")
     db.delete(line)
+    _check_not_below_paid(db, doc)
     db.commit()
     db.refresh(doc)
     return doc
@@ -2889,9 +3238,21 @@ def update_document_line(
 
     for key, value in payload.model_dump().items():
         setattr(line, key, value)
+    _check_not_below_paid(db, doc)
     db.commit()
     db.refresh(doc)
     return doc
+
+
+def _sync_payment_status(doc: Document):
+    """Allinea lo stato ai pagamenti: saldato -> pagata; non più saldato -> emessa."""
+    if doc.status in ("annullata", "archiviata", "bozza"):
+        return
+    t = document_totals(doc)
+    if t["total"] > 0 and t["residual"] <= 0:
+        doc.status = "pagata"
+    elif doc.status == "pagata":
+        doc.status = "emessa"
 
 
 @app.post("/documents/{document_id}/payments", response_model=PaymentOut, status_code=201)
@@ -2904,33 +3265,68 @@ def add_payment(
     doc = db.get(Document, document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Documento non trovato")
+    if doc.kind == "DDT":
+        raise HTTPException(status_code=400, detail="Un DDT non ha pagamenti: convertilo in fattura")
+    if doc.status in ("annullata", "archiviata"):
+        raise HTTPException(status_code=400, detail="Documento annullato o archiviato")
 
-    if payload.amount <= 0:
+    amount = r2(payload.amount)
+    if amount <= 0:
         raise HTTPException(status_code=400, detail="Importo pagamento non valido")
-    if doc.status == "annullata":
-        raise HTTPException(status_code=400, detail="Documento annullato")
+    residual = D(document_totals(doc)["residual"])
+    if amount > residual:
+        raise HTTPException(
+            status_code=400,
+            detail=f"L'importo supera il residuo da incassare ({residual:.2f} €)".replace(".", ","),
+        )
 
     payment = Payment(
         document_id=document_id,
-        amount=payload.amount,
+        date=payload.date or Date.today(),
+        amount=float(amount),
         method=payload.method or "bonifico",
         note=payload.note or ""
     )
-
     db.add(payment)
     db.flush()
+    db.refresh(doc)
 
-    totals = document_totals(doc)
-    paid = sum(p.amount for p in db.query(Payment).filter(Payment.document_id == document_id).all())
-
-    if paid >= totals["total"]:
-        doc.status = "pagata"
-    elif paid > 0 and doc.status == "bozza":
-        doc.status = "emessa"
+    if doc.status == "bozza":
+        doc.status = "emessa"  # un incasso presuppone un documento emesso
+    _sync_payment_status(doc)
 
     db.commit()
     db.refresh(payment)
     return payment
+
+
+@app.delete("/documents/{document_id}/payments/{payment_id}", status_code=204)
+def delete_payment(
+    document_id: int,
+    payment_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_manager)
+):
+    payment = db.get(Payment, payment_id)
+    if not payment or payment.document_id != document_id:
+        raise HTTPException(status_code=404, detail="Pagamento non trovato")
+    doc = db.get(Document, document_id)
+    db.delete(payment)
+    db.flush()
+    db.refresh(doc)
+    _sync_payment_status(doc)
+    db.commit()
+    return Response(status_code=204)
+
+
+# stati raggiungibili a mano: "pagata" si ottiene solo registrando i pagamenti
+_DOC_TRANSITIONS = {
+    "bozza": {"emessa", "annullata"},
+    "emessa": {"bozza", "annullata", "archiviata"},
+    "pagata": {"archiviata"},
+    "annullata": {"bozza"},
+    "archiviata": {"emessa"},
+}
 
 
 @app.post("/documents/{document_id}/status", response_model=DocumentOut)
@@ -2945,14 +3341,38 @@ def set_document_status(
         raise HTTPException(status_code=404, detail="Documento non trovato")
     if status_value not in ["bozza", "emessa", "pagata", "annullata", "archiviata"]:
         raise HTTPException(status_code=400, detail="Stato non valido")
+    if status_value == doc.status:
+        return doc
+    if status_value == "pagata":
+        raise HTTPException(status_code=400, detail="Lo stato “Pagata” si imposta registrando il pagamento")
+    if status_value not in _DOC_TRANSITIONS.get(doc.status, set()):
+        raise HTTPException(status_code=400, detail=f"Non si può passare da “{doc.status}” a “{status_value}”")
+
+    totals = document_totals(doc)
+    if status_value == "emessa" and doc.status == "bozza":
+        if not doc.lines:
+            raise HTTPException(status_code=400, detail="Aggiungi almeno una riga prima di emettere il documento")
+        if doc.kind != "DDT" and totals["total"] <= 0:
+            raise HTTPException(status_code=400, detail="Il totale del documento deve essere maggiore di zero")
+        if doc.kind == "Fattura":
+            problems = check_invoice_ready(db, doc)
+            if problems:
+                raise HTTPException(status_code=400, detail="Prima di emettere la fattura completa: " + "; ".join(problems))
+    if status_value == "bozza" and doc.payments:
+        raise HTTPException(status_code=400, detail="Il documento ha pagamenti registrati: eliminali prima")
+    if status_value == "annullata" and doc.payments:
+        raise HTTPException(status_code=400, detail="Il documento ha pagamenti registrati: eliminali prima di annullarlo")
+
     doc.status = status_value
+    if status_value == "emessa":
+        _sync_payment_status(doc)  # es. riattivazione di un documento già saldato
     db.commit()
     db.refresh(doc)
     return doc
 
 
 @app.delete("/documents/{document_id}", status_code=204)
-def delete_document(document_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_document(document_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     doc = db.get(Document, document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Documento non trovato")
@@ -2989,7 +3409,9 @@ def convert_document_to_invoice(
         source_document_id=source.id,
         status="bozza",
         tax_rate=source.tax_rate,
+        vat_nature=source.vat_nature,
         discount=source.discount,
+        discount_pct=source.discount_pct,
         notes=f"Generata da {source.kind} {source.number}",
         lines=[
             DocumentLine(
@@ -3051,12 +3473,12 @@ def scadenzario(db: Session = Depends(get_db), _: User = Depends(get_current_use
     rows = []
     for inv in db.query(Document).filter(
         Document.kind == "Fattura",
-        Document.status.notin_(["annullata", "archiviata"])
+        Document.status == "emessa"
     ).order_by(Document.due_date.is_(None), Document.due_date, Document.id).all():
         totals = document_totals(inv)
-        paid = sum(p.amount for p in inv.payments)
-        residual = round(totals["total"] - paid, 2)
-        if residual <= 0.009:
+        paid = totals["paid"]
+        residual = totals["residual"]
+        if residual <= 0:
             continue
         rows.append({
             "id": inv.id,
@@ -3066,7 +3488,7 @@ def scadenzario(db: Session = Depends(get_db), _: User = Depends(get_current_use
             "client_id": inv.client_id,
             "client_name": clients_map.get(inv.client_id, ""),
             "total": totals["total"],
-            "paid": round(paid, 2),
+            "paid": paid,
             "residual": residual,
             "days_overdue": (today - inv.due_date).days if inv.due_date and inv.due_date < today else 0,
         })
@@ -3130,8 +3552,8 @@ def list_users(db: Session = Depends(get_db), _: User = Depends(require_admin)):
 def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = Depends(require_admin)):
     if not payload.username or len(payload.username) < 3:
         raise HTTPException(status_code=400, detail="Username di almeno 3 caratteri")
-    if len(payload.password) < 6:
-        raise HTTPException(status_code=400, detail="Password di almeno 6 caratteri")
+    if len(payload.password) < MIN_PASSWORD:
+        raise HTTPException(status_code=400, detail=f"Password di almeno {MIN_PASSWORD} caratteri")
     if payload.role not in ("admin", "manager", "user"):
         raise HTTPException(status_code=400, detail="Ruolo non valido")
     if db.query(User).filter(User.username == payload.username).first():
@@ -3175,8 +3597,8 @@ def set_user_password(user_id: int, payload: UserSetPassword, db: Session = Depe
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="Utente non trovato")
-    if len(payload.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Password di almeno 6 caratteri")
+    if len(payload.new_password) < MIN_PASSWORD:
+        raise HTTPException(status_code=400, detail=f"Password di almeno {MIN_PASSWORD} caratteri")
     user.hashed_password = hash_password(payload.new_password)
     db.commit()
     return {"ok": True}
@@ -3270,15 +3692,14 @@ def upload_archive_file(
     os.makedirs(target, exist_ok=True)
     safe_name = sanitize_filename(file.filename)
     stored = os.path.join(target, f"{uuid.uuid4().hex}_{safe_name}")
-    with open(stored, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    size = save_upload(file, stored)
 
     att = ArchiveFile(
         folder_id=folder_id,
         filename=safe_name,
         stored_path=stored,
         content_type=file.content_type or "application/octet-stream",
-        file_size=os.path.getsize(stored),
+        file_size=size,
         notes=notes or "",
         user_id=current_user.id,
     )
@@ -3291,9 +3712,10 @@ def upload_archive_file(
 @app.get("/archive/files/{file_id}/download")
 def download_archive_file(file_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     att = db.get(ArchiveFile, file_id)
-    if not att or not os.path.exists(att.stored_path):
+    path = resolve_stored_path(att.stored_path) if att else ""
+    if not att or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File non trovato")
-    return FileResponse(att.stored_path, filename=att.filename, media_type=att.content_type)
+    return FileResponse(path, filename=att.filename, media_type=att.content_type)
 
 
 @app.delete("/archive/files/{file_id}", status_code=204)
@@ -3302,7 +3724,7 @@ def delete_archive_file(file_id: int, db: Session = Depends(get_db), _: User = D
     if not att:
         raise HTTPException(status_code=404, detail="File non trovato")
     try:
-        os.remove(att.stored_path)
+        os.remove(resolve_stored_path(att.stored_path))
     except OSError:
         pass
     db.delete(att)
@@ -3314,13 +3736,74 @@ def delete_archive_file(file_id: int, db: Session = Depends(get_db), _: User = D
 # BACKUP DATI (admin)
 # =========================
 
+BACKUP_DIR = DATA_DIR / "backups"
+BACKUP_KEEP = 14
+
+
+def make_backup(target: Path) -> Path:
+    """Copia consistente del database (anche se l'app lo sta usando)."""
+    import sqlite3
+    target.parent.mkdir(parents=True, exist_ok=True)
+    src = sqlite3.connect(engine.url.database)
+    try:
+        dst = sqlite3.connect(str(target))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    return target
+
+
+def daily_backup():
+    """Un backup al giorno in data/backups, conservando gli ultimi BACKUP_KEEP."""
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    target = BACKUP_DIR / f"shipyard_{Date.today():%Y%m%d}.db"
+    if not target.exists():
+        make_backup(target)
+        logging.getLogger().info("Backup automatico creato: %s", target)
+    old = sorted(BACKUP_DIR.glob("shipyard_*.db"))
+    for f in old[:-BACKUP_KEEP]:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
+def _backup_loop():
+    import time
+    while True:
+        try:
+            daily_backup()
+        except Exception:  # un backup fallito non deve fermare l'app
+            logging.getLogger().exception("Backup automatico non riuscito")
+        time.sleep(3600)
+
+
 @app.get("/admin/backup")
-def backup_database(db: Session = Depends(get_db), _: User = Depends(require_admin)):
-    db_path = engine.url.database
-    if not db_path or not os.path.exists(db_path):
+def backup_database(_: User = Depends(require_admin)):
+    if not DATABASE_URL.startswith("sqlite") or not engine.url.database or not os.path.exists(engine.url.database):
         raise HTTPException(status_code=400, detail="Backup non disponibile")
     filename = f"cantiere_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
-    return FileResponse(db_path, filename=filename, media_type="application/octet-stream")
+    snapshot = make_backup(Path(UPLOAD_DIR).parent / f".snapshot_{uuid.uuid4().hex}.db")
+    from starlette.background import BackgroundTask
+    return FileResponse(
+        snapshot, filename=filename, media_type="application/octet-stream",
+        background=BackgroundTask(lambda: snapshot.unlink(missing_ok=True)),
+    )
+
+
+@app.get("/admin/backup/info")
+def backup_info(_: User = Depends(require_admin)):
+    files = sorted(BACKUP_DIR.glob("shipyard_*.db")) if BACKUP_DIR.exists() else []
+    return {
+        "folder": str(BACKUP_DIR),
+        "count": len(files),
+        "last": datetime.fromtimestamp(files[-1].stat().st_mtime).isoformat() if files else None,
+        "keep": BACKUP_KEEP,
+    }
 
 
 # =========================
@@ -3437,7 +3920,7 @@ def update_supplier(supplier_id: int, payload: SupplierCreate, db: Session = Dep
 
 
 @app.delete("/suppliers/{supplier_id}", status_code=204)
-def delete_supplier(supplier_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_supplier(supplier_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     supplier = db.get(Supplier, supplier_id)
     if not supplier:
         raise HTTPException(status_code=404, detail="Fornitore non trovato")
@@ -3453,10 +3936,25 @@ def delete_supplier(supplier_id: int, db: Session = Depends(get_db), _: User = D
 # ACQUISTI: FATTURE DI ACQUISTO
 # =========================
 
+def _normalize_purchase_invoice(data: dict, fallback_date: Optional[Date] = None):
+    if data.get("status") not in ("da_pagare", "pagata"):
+        raise HTTPException(status_code=400, detail="Stato non valido")
+    if not data.get("date"):
+        data["date"] = fallback_date or Date.today()
+    if data["status"] == "pagata":
+        data["paid_date"] = data.get("paid_date") or Date.today()
+    else:
+        data["paid_date"] = None
+    data["amount_net"] = float(r2(data["amount_net"]))
+
+
 def _invoice_out(db: Session, inv: PurchaseInvoice) -> dict:
     data = PurchaseInvoiceOut.model_validate(inv).model_dump()
-    data["vat"] = round((inv.amount_net or 0) * (inv.vat_rate or 0) / 100, 2)
-    data["total"] = round((inv.amount_net or 0) + data["vat"], 2)
+    net = r2(inv.amount_net)
+    vat = r2(net * D(inv.vat_rate) / 100)
+    data["amount_net"] = float(net)
+    data["vat"] = float(vat)
+    data["total"] = float(net + vat)
     if inv.supplier:
         data["supplier_name"] = inv.supplier.name
     return data
@@ -3485,11 +3983,8 @@ def list_purchase_invoices(
 def create_purchase_invoice(payload: PurchaseInvoiceCreate, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     if not db.get(Supplier, payload.supplier_id):
         raise HTTPException(status_code=404, detail="Fornitore non trovato")
-    if payload.amount_net <= 0:
-        raise HTTPException(status_code=400, detail="L'imponibile deve essere maggiore di zero")
     data = payload.model_dump()
-    if not data.get("date"):
-        data["date"] = Date.today()
+    _normalize_purchase_invoice(data)
     inv = PurchaseInvoice(**data)
     db.add(inv)
     db.commit()
@@ -3505,8 +4000,7 @@ def update_purchase_invoice(invoice_id: int, payload: PurchaseInvoiceCreate, db:
     if not db.get(Supplier, payload.supplier_id):
         raise HTTPException(status_code=404, detail="Fornitore non trovato")
     data = payload.model_dump()
-    if not data.get("date"):
-        data["date"] = inv.date
+    _normalize_purchase_invoice(data, inv.date)
     for key, value in data.items():
         setattr(inv, key, value)
     db.commit()
@@ -3515,7 +4009,7 @@ def update_purchase_invoice(invoice_id: int, payload: PurchaseInvoiceCreate, db:
 
 
 @app.delete("/purchase-invoices/{invoice_id}", status_code=204)
-def delete_purchase_invoice(invoice_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_purchase_invoice(invoice_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     inv = db.get(PurchaseInvoice, invoice_id)
     if not inv:
         raise HTTPException(status_code=404, detail="Fattura non trovata")
@@ -3526,43 +4020,61 @@ def delete_purchase_invoice(invoice_id: int, db: Session = Depends(get_db), _: U
 
 @app.get("/vat-register")
 def vat_register(year: Optional[int] = None, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    """Registro IVA base: IVA a debito (vendite) e a credito (acquisti) dell'anno."""
+    """Registro IVA base: IVA a debito (vendite) e a credito (acquisti) dell'anno,
+    con il dettaglio per aliquota. Le vendite sono le fatture emesse o pagate
+    dell'anno di emissione (le bozze e le annullate non entrano)."""
     year = year or Date.today().year
+    first, last = Date(year, 1, 1), Date(year, 12, 31)
     clients_map = {c.id: c.name for c in db.query(Client).all()}
 
     sales = []
-    sales_taxable = sales_vat = 0.0
+    sales_taxable = sales_vat = Decimal(0)
+    sales_rates: dict = {}
     for d in db.query(Document).filter(
         Document.kind == "Fattura",
-        Document.status.notin_(["annullata", "archiviata"]),
-        Document.number.like(f"%-{year}-%"),
-    ).order_by(Document.date).all():
+        Document.status.in_(["emessa", "pagata"]),
+        Document.date >= first, Document.date <= last,
+    ).order_by(Document.date, Document.id).all():
         totals = document_totals(d)
         sales.append({
             "number": d.number, "date": d.date, "client_name": clients_map.get(d.client_id, ""),
-            "taxable": totals["taxable"], "vat": totals["tax"], "total": totals["total"],
+            "tax_rate": d.tax_rate, "taxable": totals["taxable"], "vat": totals["tax"], "total": totals["total"],
         })
-        sales_taxable += totals["taxable"]
-        sales_vat += totals["tax"]
+        sales_taxable += D(totals["taxable"])
+        sales_vat += D(totals["tax"])
+        agg = sales_rates.setdefault(d.tax_rate or 0, [Decimal(0), Decimal(0)])
+        agg[0] += D(totals["taxable"])
+        agg[1] += D(totals["tax"])
 
     purchases = []
-    purchases_net = purchases_vat = 0.0
-    for inv in db.query(PurchaseInvoice).filter(PurchaseInvoice.date.like(f"{year}-%")).order_by(PurchaseInvoice.date).all():
+    purchases_net = purchases_vat = Decimal(0)
+    purchase_rates: dict = {}
+    for inv in db.query(PurchaseInvoice).filter(
+        PurchaseInvoice.date >= first, PurchaseInvoice.date <= last
+    ).order_by(PurchaseInvoice.date, PurchaseInvoice.id).all():
         out = _invoice_out(db, inv)
         purchases.append(out)
-        purchases_net += out["amount_net"]
-        purchases_vat += out["vat"]
+        purchases_net += D(out["amount_net"])
+        purchases_vat += D(out["vat"])
+        agg = purchase_rates.setdefault(inv.vat_rate or 0, [Decimal(0), Decimal(0)])
+        agg[0] += D(out["amount_net"])
+        agg[1] += D(out["vat"])
+
+    def by_rate(rates):
+        return [{"rate": r, "taxable": money(v[0]), "vat": money(v[1])} for r, v in sorted(rates.items())]
 
     return {
         "year": year,
         "sales": sales,
         "purchases": purchases,
+        "sales_by_rate": by_rate(sales_rates),
+        "purchases_by_rate": by_rate(purchase_rates),
         "summary": {
-            "sales_taxable": round(sales_taxable, 2),
-            "sales_vat": round(sales_vat, 2),
-            "purchases_net": round(purchases_net, 2),
-            "purchases_vat": round(purchases_vat, 2),
-            "balance": round(sales_vat - purchases_vat, 2),  # positivo = IVA a debito
+            "sales_taxable": money(sales_taxable),
+            "sales_vat": money(sales_vat),
+            "purchases_net": money(purchases_net),
+            "purchases_vat": money(purchases_vat),
+            "balance": money(sales_vat - purchases_vat),  # positivo = IVA a debito
         },
     }
 
@@ -3782,7 +4294,7 @@ def update_worker(worker_id: int, payload: WorkerCreate, db: Session = Depends(g
 
 
 @app.delete("/workers/{worker_id}", status_code=204)
-def delete_worker(worker_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_worker(worker_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     worker = db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(status_code=404, detail="Lavoratore non trovato")
@@ -3815,9 +4327,9 @@ def project_timesheets(project_id: int, db: Session = Depends(get_db), _: User =
     if not db.get(Project, project_id):
         raise HTTPException(status_code=404, detail="Commessa non trovata")
     entries = db.query(TimeEntry).filter(TimeEntry.project_id == project_id).order_by(TimeEntry.date.desc(), TimeEntry.id.desc()).all()
-    total_hours = sum(e.hours for e in entries)
-    total_labor_cost = sum(e.hours * (e.hourly_cost or 0) for e in entries)
-    total_labor_price = sum(e.hours * (e.hourly_price or 0) for e in entries)
+    total_hours = sum((D(e.hours) for e in entries), Decimal(0))
+    total_labor_cost = sum((r2(D(e.hours) * D(e.hourly_cost)) for e in entries), Decimal(0))
+    total_labor_price = sum((r2(D(e.hours) * D(e.hourly_price)) for e in entries), Decimal(0))
     # ore preventivate: lavori di manodopera espressi in ore
     budget_hours = sum(j.qty for j in db.query(Job).filter(
         Job.project_id == project_id, Job.unit == "ore").all())
@@ -3825,15 +4337,81 @@ def project_timesheets(project_id: int, db: Session = Depends(get_db), _: User =
     for e in entries:
         name = e.worker_ref.name if e.worker_ref else (e.worker or "—")
         agg = by_worker.setdefault(name, {"hours": 0, "cost": 0})
-        agg["hours"] = round(agg["hours"] + e.hours, 2)
-        agg["cost"] = round(agg["cost"] + e.hours * (e.hourly_cost or 0), 2)
+        agg["hours"] = money(D(agg["hours"]) + D(e.hours))
+        agg["cost"] = money(D(agg["cost"]) + r2(D(e.hours) * D(e.hourly_cost)))
     return {
         "entries": [_time_entry_out(e) for e in entries],
-        "total_hours": round(total_hours, 2),
-        "total_labor_cost": round(total_labor_cost, 2),
-        "total_labor_price": round(total_labor_price, 2),
+        "total_hours": money(total_hours),
+        "total_labor_cost": money(total_labor_cost),
+        "total_labor_price": money(total_labor_price),
         "budget_hours": round(budget_hours, 2),
         "by_worker": by_worker,
+    }
+
+
+_LABOR_CATEGORIES = {"manodopera"}
+_MATERIAL_CATEGORIES = {"ricambi", "materiali"}
+
+
+@app.get("/projects/{project_id}/summary")
+def project_summary(project_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    """Redditività della commessa. Ricavo = valore dei lavori a prezzo di listino.
+    Per ogni voce di costo si usa il consuntivo se esiste (ore registrate, materiali
+    scaricati dal magazzino), altrimenti il preventivo dei lavori; i costi di
+    noleggi, subappalti e altro vengono sempre dai lavori."""
+    if not db.get(Project, project_id):
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+
+    jobs = db.query(Job).filter(Job.project_id == project_id).all()
+    revenue = Decimal(0)
+    est = {"labor": Decimal(0), "material": Decimal(0), "other": Decimal(0)}
+    budget_hours = Decimal(0)
+    for j in jobs:
+        revenue += r2(D(j.qty) * D(j.unit_price))
+        cost = r2(D(j.qty) * D(j.unit_cost))
+        cat = (j.category or "").strip().lower()
+        bucket = "labor" if cat in _LABOR_CATEGORIES else "material" if cat in _MATERIAL_CATEGORIES else "other"
+        est[bucket] += cost
+        if (j.unit or "").strip().lower() == "ore":
+            budget_hours += D(j.qty)
+
+    movs = db.query(Movement).filter(Movement.project_id == project_id, Movement.type.in_(["scarico", "reso"])).all()
+    material_actual = sum(
+        ((1 if m.type == "scarico" else -1) * r2(D(m.qty) * D(m.unit_cost)) for m in movs), Decimal(0))
+
+    entries = db.query(TimeEntry).filter(TimeEntry.project_id == project_id).all()
+    hours = sum((D(e.hours) for e in entries), Decimal(0))
+    labor_actual = sum((r2(D(e.hours) * D(e.hourly_cost)) for e in entries), Decimal(0))
+    labor_billable = sum((r2(D(e.hours) * D(e.hourly_price)) for e in entries), Decimal(0))
+
+    labor_cost = labor_actual if hours > 0 else est["labor"]
+    material_cost = material_actual if movs else est["material"]
+    total_cost = labor_cost + material_cost + est["other"]
+    estimated_cost = est["labor"] + est["material"] + est["other"]
+    margin = revenue - total_cost
+
+    invoices = db.query(Document).filter(
+        Document.project_id == project_id, Document.kind == "Fattura",
+        Document.status.in_(["emessa", "pagata"])).all()
+    invoiced = sum((D(document_totals(i)["taxable"]) for i in invoices), Decimal(0))
+
+    return {
+        "revenue": money(revenue),
+        "estimated_cost": money(estimated_cost),
+        "labor_cost": money(labor_cost),
+        "labor_source": "ore registrate" if hours > 0 else "preventivo",
+        "material_cost": money(material_cost),
+        "material_source": "scarichi di magazzino" if movs else "preventivo",
+        "other_cost": money(est["other"]),
+        "total_cost": money(total_cost),
+        "margin": money(margin),
+        "margin_pct": round(float(margin / revenue * 100), 1) if revenue > 0 else None,
+        "hours": float(r2(hours)),
+        "budget_hours": float(r2(budget_hours)),
+        "labor_billable": money(labor_billable),
+        "invoiced": money(invoiced),
+        "to_invoice": money(max(Decimal(0), revenue - invoiced)),
+        "jobs": len(jobs),
     }
 
 
@@ -3868,8 +4446,8 @@ def update_time_entry(entry_id: int, payload: TimeEntryCreate, db: Session = Dep
     entry = db.get(TimeEntry, entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Riga ore non trovata")
-    if payload.hours <= 0 or payload.hours > 24:
-        raise HTTPException(status_code=400, detail="Le ore devono essere tra 0,1 e 24")
+    if payload.job_id and not db.get(Job, payload.job_id):
+        raise HTTPException(status_code=404, detail="Lavoro non trovato")
     rates = _resolve_rates(db, payload)
     entry.job_id = payload.job_id
     entry.worker = rates["worker"]
@@ -3922,10 +4500,7 @@ def stock_alerts(db: Session = Depends(get_db), _: User = Depends(get_current_us
 # =========================
 
 def next_po_number(db: Session) -> str:
-    year = Date.today().year
-    prefix = f"OA-{year}"
-    count = db.query(PurchaseOrder).filter(PurchaseOrder.number.like(f"{prefix}%")).count()
-    return f"{prefix}-{count + 1:05d}"
+    return _next_number(db, PurchaseOrder, f"OA-{Date.today().year}-")
 
 
 def _po_out(po: PurchaseOrder) -> dict:
@@ -3951,7 +4526,7 @@ def get_purchase_order(order_id: int, db: Session = Depends(get_db), _: User = D
     if not po:
         raise HTTPException(status_code=404, detail="Ordine non trovato")
     out = _po_out(po)
-    out["total"] = round(sum(l.qty * l.unit_cost for l in po.lines), 2)
+    out["total"] = money(sum((D(l.qty) * D(l.unit_cost) for l in po.lines), Decimal(0)))
     return out
 
 
@@ -3964,7 +4539,7 @@ def create_purchase_order(payload: PurchaseOrderCreate, db: Session = Depends(ge
         supplier_id=payload.supplier_id,
         date=payload.date or Date.today(),
         expected_date=payload.expected_date,
-        status=payload.status or "bozza",
+        status=payload.status if payload.status in ("bozza", "inviato") else "bozza",
         notes=payload.notes or "",
         lines=[
             PurchaseOrderLine(item_id=l.item_id, description=l.description, qty=l.qty, unit_cost=l.unit_cost)
@@ -3991,6 +4566,10 @@ def update_purchase_order(order_id: int, payload: PurchaseOrderCreate, db: Sessi
     po.expected_date = payload.expected_date
     po.notes = payload.notes or ""
     if payload.status and payload.status != po.status:
+        if payload.status == "ricevuto":
+            raise HTTPException(status_code=400, detail="Per ricevere l'ordine usa “Ricevi merce”: genera i carichi in magazzino")
+        if payload.status not in ("bozza", "inviato", "annullato"):
+            raise HTTPException(status_code=400, detail="Stato non valido")
         po.status = payload.status
     if payload.lines is not None:
         po.lines.clear()
@@ -4009,6 +4588,10 @@ def set_purchase_order_status(order_id: int, status_value: str, db: Session = De
         raise HTTPException(status_code=404, detail="Ordine non trovato")
     if status_value not in ["bozza", "inviato", "ricevuto", "annullato"]:
         raise HTTPException(status_code=400, detail="Stato non valido")
+    if status_value == "ricevuto":
+        raise HTTPException(status_code=400, detail="Per ricevere l'ordine usa “Ricevi merce”: genera i carichi in magazzino")
+    if po.status == "ricevuto":
+        raise HTTPException(status_code=400, detail="Ordine già ricevuto: lo stato non si cambia")
     po.status = status_value
     db.commit()
     db.refresh(po)
@@ -4039,7 +4622,10 @@ def receive_purchase_order(
         if not line.item_id:
             continue  # righe libere senza articolo: nessun carico
         stock = get_or_create_stock(db, warehouse_id, line.item_id)
-        stock.qty += line.qty
+        item = db.get(Item, line.item_id)
+        if item:
+            apply_average_cost(db, item, line.qty, line.unit_cost)
+        stock.qty = float(D(stock.qty) + D(line.qty))
         db.add(Movement(
             warehouse_id=warehouse_id,
             item_id=line.item_id,
@@ -4058,7 +4644,7 @@ def receive_purchase_order(
 
 
 @app.delete("/purchase-orders/{order_id}", status_code=204)
-def delete_purchase_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def delete_purchase_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(require_manager)):
     po = db.get(PurchaseOrder, order_id)
     if not po:
         raise HTTPException(status_code=404, detail="Ordine non trovato")
