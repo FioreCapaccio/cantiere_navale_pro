@@ -1531,7 +1531,7 @@ def sanitize_filename(name: str) -> str:
 
 from sqlalchemy import text as SQLText
 
-app = FastAPI(title="Cantiere Navale Pro", version="2.0")
+app = FastAPI(title="Cantiere Navale Pro", version="2.1")
 
 app.add_middleware(
     CORSMiddleware,

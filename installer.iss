@@ -3,7 +3,7 @@
 ; Versione opzionale da riga di comando:  ISCC /DAPP_VERSION=2.1 installer.iss
 
 #ifndef APP_VERSION
-#define APP_VERSION "2.0"
+#define APP_VERSION "2.1"
 #endif
 
 [Setup]
